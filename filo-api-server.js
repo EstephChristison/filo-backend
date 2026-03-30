@@ -51,12 +51,12 @@ const config = {
 // ─── Initialize Services ─────────────────────────────────────────
 
 const pool = new pg.Pool(config.database);
-const stripe = new Stripe(config.stripe.secretKey);
-const s3 = new AWS.S3({
+const stripe = config.stripe.secretKey ? new Stripe(config.stripe.secretKey) : null;
+const s3 = config.aws.accessKeyId ? new AWS.S3({
   region: config.aws.region,
   accessKeyId: config.aws.accessKeyId,
   secretAccessKey: config.aws.secretAccessKey,
-});
+}) : null;
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -1150,7 +1150,7 @@ app.get('/api/export/plants/csv', authenticate, async (req, res) => {
 import OpenAI from 'openai';
 import { createAIHandler } from './filo-ai-pipeline.js';
 const callAI = createAIHandler(db);
-const openaiClient = new OpenAI({ apiKey: config.openai.apiKey });
+const openaiClient = config.openai.apiKey ? new OpenAI({ apiKey: config.openai.apiKey }) : null;
 
 async function callManusAI(taskType, data) {
   // Legacy function name kept for compatibility — routes to direct OpenAI calls
