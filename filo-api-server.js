@@ -1503,13 +1503,23 @@ Write the narrative and closing statement as JSON.`,
 // ─── Health Check ────────────────────────────────────────────────
 
 app.get('/api/health', async (req, res) => {
+  const health = { status: 'healthy', timestamp: new Date().toISOString(), version: '1.0.0', services: {} };
   try {
-    await db.query('SELECT 1');
-    res.json({ status: 'healthy', timestamp: new Date().toISOString(), version: '1.0.0' });
+    const dbCheck = Promise.race([
+      db.query('SELECT 1').then(() => 'connected'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
+    ]);
+    health.services.database = await dbCheck;
   } catch (err) {
-    res.status(500).json({ status: 'unhealthy', error: err.message });
+    health.services.database = `unavailable: ${err.message}`;
   }
+  health.services.openai = openaiClient ? 'configured' : 'not configured';
+  health.services.stripe = stripe ? 'configured' : 'not configured';
+  health.services.s3 = s3 ? 'configured' : 'not configured';
+  res.json(health);
 });
+
+app.get('/api/ping', (req, res) => res.json({ pong: true }));
 
 // ─── 404 ─────────────────────────────────────────────────────────
 
