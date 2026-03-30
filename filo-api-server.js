@@ -104,12 +104,21 @@ const db = {
 // ─── Express App ─────────────────────────────────────────────────
 
 const app = express();
+app.set('trust proxy', 1); // Trust Railway's reverse proxy for rate limiting + real IPs
 
 // Stripe webhook needs raw body — must come before json parser
 app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), handleStripeWebhook);
 
 app.use(helmet());
-app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:3000', credentials: true }));
+app.use(cors({
+  origin: [
+    process.env.FRONTEND_URL || 'http://localhost:3000',
+    'https://app.myfilocrm.com',
+    'https://filo-app-five.vercel.app',
+    'http://localhost:3000',
+  ],
+  credentials: true,
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(morgan('combined'));
 
