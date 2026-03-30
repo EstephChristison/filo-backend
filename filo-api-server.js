@@ -1147,8 +1147,10 @@ app.get('/api/export/plants/csv', authenticate, async (req, res) => {
 // For now, this wrapper delegates to the AI pipeline module.
 // If OPENAI_API_KEY is not set, returns graceful fallbacks for development.
 
+import OpenAI from 'openai';
 import { createAIHandler } from './filo-ai-pipeline.js';
 const callAI = createAIHandler(db);
+const openaiClient = new OpenAI({ apiKey: config.openai.apiKey });
 
 async function callManusAI(taskType, data) {
   // Legacy function name kept for compatibility — routes to direct OpenAI calls
@@ -1269,6 +1271,225 @@ async function triggerCrmSync(companyId, entityType, entityId, action, data) {
 
   // Async CRM push will be handled by the CRM integration module
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// AI PROXY ENDPOINTS (frontend calls these instead of OpenAI directly)
+// Keeps the API key server-side only — no VITE_OPENAI_API_KEY needed
+// ═══════════════════════════════════════════════════════════════════
+
+const aiRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: { error: 'Too many AI requests, please wait a moment' },
+});
+
+app.post('/api/ai/detect-plants', aiRateLimit, async (req, res) => {
+  try {
+    const { imageBase64, location, usdaZone } = req.body;
+    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 is required' });
+
+    const locationContext = location
+      ? `This property is in ${location.city}, ${location.state} (USDA Zone ${usdaZone || 'unknown'}).`
+      : '';
+
+    const response = await openaiClient.chat.completions.create({
+      model: config.openai.model,
+      messages: [
+        {
+          role: 'system',
+          content: `You are an expert horticulturist and landscape analyst. You identify plants in residential landscape photographs with high accuracy.
+
+Given a photograph of a residential landscape:
+1. Identify every visible plant, shrub, tree, and ground cover
+2. For each plant, provide:
+   - common_name, botanical_name, confidence (0-1), position_x (0-100), position_y (0-100),
+     bounding_box: { x, y, width, height } as percentages,
+     category: tree|shrub|perennial|annual|groundcover|ornamental_grass|vine|succulent,
+     health_assessment: healthy|stressed|declining|dead,
+     approximate_size: container-equivalent (e.g. "3-gallon")
+
+Return ONLY valid JSON: { "plants": [...] }`,
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: imageBase64, detail: 'high' } },
+            { type: 'text', text: `Identify all plants in this residential landscape photo. ${locationContext} Return the JSON analysis.` },
+          ],
+        },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 4000,
+      temperature: 0.2,
+    });
+
+    const result = JSON.parse(response.choices[0].message.content);
+    res.json({ success: true, plants: result.plants || [] });
+  } catch (err) {
+    console.error('[AI Proxy] detect-plants error:', err);
+    res.status(500).json({ success: false, error: err.message, plants: [] });
+  }
+});
+
+app.post('/api/ai/generate-design', aiRateLimit, async (req, res) => {
+  try {
+    const {
+      photoBase64, sunExposure, designStyle, specialRequests,
+      availablePlants, existingPlantsKeep, existingPlantsRemove,
+      location, lighting, hardscape,
+    } = req.body;
+
+    const loc = location || {};
+    const userContent = [];
+
+    if (photoBase64) {
+      userContent.push({ type: 'image_url', image_url: { url: photoBase64, detail: 'high' } });
+    }
+
+    userContent.push({
+      type: 'text',
+      text: `Design a landscape for this property.
+
+SITE CONDITIONS:
+- Location: ${loc.city || 'Houston'}, ${loc.state || 'TX'} (USDA Zone ${loc.zone || '9a'})
+- Sun exposure: ${sunExposure || 'full_sun'}
+- Design style: ${designStyle || 'naturalistic'}
+
+CLIENT REQUESTS:
+${specialRequests || 'No special requests.'}
+${lighting ? '- Lighting requested' : ''}
+${hardscape ? '- Hardscape changes noted' : ''}
+
+EXISTING PLANTS TO KEEP:
+${(existingPlantsKeep || []).length > 0 ? existingPlantsKeep.map(p => `- ${p.name || p.identified_name} at (${p.position_x}, ${p.position_y})`).join('\n') : 'None'}
+
+PLANTS TO REMOVE:
+${(existingPlantsRemove || []).length > 0 ? existingPlantsRemove.map(p => `- ${p.name || p.identified_name} at (${p.position_x}, ${p.position_y})`).join('\n') : 'None'}
+
+AVAILABLE PLANT INVENTORY (select ONLY from these):
+${JSON.stringify((availablePlants || []).slice(0, 50), null, 0)}
+
+Create a complete plant placement plan. Return JSON with: design_rationale, plant_placements[], services_recommended, design_summary.`,
+    });
+
+    const response = await openaiClient.chat.completions.create({
+      model: config.openai.model,
+      messages: [
+        {
+          role: 'system',
+          content: `You are a professional landscape architect creating plant placement plans for residential properties. Follow layering, spacing, repetition, color theory, and architecture principles. Return ONLY valid JSON with: design_rationale, plant_placements (array with plant_library_id, common_name, quantity, container_size, position_x, position_y, z_index, layer, grouping_notes), services_recommended (soil_amendment_cy, mulch_cy, edging_lf, irrigation_needed, lighting_zones), design_summary.`,
+        },
+        { role: 'user', content: userContent },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 4000,
+      temperature: 0.4,
+    });
+
+    const data = JSON.parse(response.choices[0].message.content);
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('[AI Proxy] generate-design error:', err);
+    res.status(500).json({ success: false, data: null, error: err.message });
+  }
+});
+
+app.post('/api/ai/chat-command', aiRateLimit, async (req, res) => {
+  try {
+    const { message, currentPlants, availablePlants } = req.body;
+    if (!message) return res.status(400).json({ error: 'message is required' });
+
+    const response = await openaiClient.chat.completions.create({
+      model: config.openai.model,
+      messages: [
+        {
+          role: 'system',
+          content: `You are a landscape design assistant interpreting user modification commands. Available actions: swap_plant, add_plant, remove_plant, move_plant, resize_bed, adjust_quantity. Return JSON: { message, actions: [{ type, oldPlantId, newPlantId, plantId, quantity, x, y, reason }], warnings: [] }`,
+        },
+        {
+          role: 'user',
+          content: `User command: "${message}"
+
+Current design plants:
+${JSON.stringify(currentPlants || [], null, 2)}
+
+Available plants for substitution/addition:
+${JSON.stringify(availablePlants || [], null, 2)}
+
+Interpret the command and return the action JSON.`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 2000,
+      temperature: 0.3,
+    });
+
+    const result = JSON.parse(response.choices[0].message.content);
+    res.json({
+      success: true,
+      message: result.message || 'Design updated.',
+      actions: result.actions || [],
+      warnings: result.warnings || [],
+    });
+  } catch (err) {
+    console.error('[AI Proxy] chat-command error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'I had trouble processing that command.',
+      actions: [],
+      warnings: [],
+      error: err.message,
+    });
+  }
+});
+
+app.post('/api/ai/narrative', aiRateLimit, async (req, res) => {
+  try {
+    const {
+      companyName, clientName, address, designStyle,
+      sunExposure, plants, lighting, hardscape, specialRequests,
+    } = req.body;
+
+    const response = await openaiClient.chat.completions.create({
+      model: config.openai.model,
+      messages: [
+        {
+          role: 'system',
+          content: `You are a professional landscape design proposal writer. Write formal, third-person scope of work narratives. 2-3 paragraphs, 150-250 words. Do NOT mention pricing, quantities, container sizes, or any software. Return JSON: { "narrative": "...", "closing": "..." }`,
+        },
+        {
+          role: 'user',
+          content: `Write a scope of work narrative:
+
+Company: ${companyName || "King's Garden Landscaping"}
+Client: ${clientName}
+Property: ${address}
+Design Style: ${designStyle || 'naturalistic'}
+Sun Exposure: ${sunExposure || 'full sun'}
+Plant Selections: ${(plants || []).join(', ') || 'various species'}
+${lighting ? 'Landscape Lighting: Included' : ''}
+${hardscape ? `Hardscape Notes: ${hardscape}` : ''}
+${specialRequests ? `Special Requests: ${specialRequests}` : ''}
+
+Write the narrative and closing statement as JSON.`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 1500,
+      temperature: 0.6,
+    });
+
+    const result = JSON.parse(response.choices[0].message.content);
+    res.json({
+      success: true,
+      text: result.narrative || result.text || '',
+      closing: result.closing || '',
+    });
+  } catch (err) {
+    console.error('[AI Proxy] narrative error:', err);
+    res.status(500).json({ success: false, text: '', closing: '', error: err.message });
+  }
+});
 
 // ─── Health Check ────────────────────────────────────────────────
 
