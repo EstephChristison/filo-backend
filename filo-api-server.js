@@ -319,6 +319,9 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
     if (password.length < 8) {
       return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
+    if (companyName.length > 255 || firstName.length > 100 || lastName.length > 100) {
+      return res.status(400).json({ error: 'One or more fields exceed maximum length' });
+    }
 
     const existing = await db.getOne('SELECT id FROM users WHERE email = $1', [email]);
     if (existing) return res.status(409).json({ error: 'Email already registered' });
@@ -369,6 +372,7 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
     res.status(201).json({ token, refreshToken, user: { id: result.userId, companyId: result.companyId, role: result.role } });
   } catch (err) {
     console.error('Register error:', err);
+    if (err.code === '22001') return res.status(400).json({ error: 'One or more fields exceed maximum length' });
     res.status(500).json({ error: 'Registration failed' });
   }
 });
