@@ -2863,6 +2863,14 @@ const aiRateLimit = rateLimit({
   message: { error: 'Too many AI requests, please wait a moment' },
 });
 
+app.get('/api/ai/health', authenticate, (req, res) => {
+  res.json({
+    configured: !!openaiClient,
+    model: openaiClient ? config.openai.model : null,
+    status: openaiClient ? 'ready' : 'not_configured',
+  });
+});
+
 app.post('/api/ai/detect-plants', authenticate, aiRateLimit, async (req, res) => {
   try {
     if (!openaiClient) return res.status(503).json({ error: 'AI service not configured' });
