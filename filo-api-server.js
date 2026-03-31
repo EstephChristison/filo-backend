@@ -860,6 +860,7 @@ app.put('/api/projects/:id', authenticate, async (req, res) => {
     if (updates.length === 0) return res.json({ message: 'No fields to update' });
     values.push(req.params.id, req.user.companyId);
     const project = await db.getOne(`UPDATE projects SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = $${idx + 1} RETURNING *`, values);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
     res.json(project);
   } catch (err) {
     console.error('PUT /api/projects/:id error:', err.message);
