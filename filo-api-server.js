@@ -771,10 +771,19 @@ app.post('/api/projects', authenticate, requireActiveSubscription, async (req, r
 
       // Create property areas
       if (areas?.length) {
+        const AREA_TYPE_MAP = {
+          'front_yard': 'front_yard', 'front yard': 'front_yard', 'front': 'front_yard',
+          'back_yard': 'back_yard', 'back yard': 'back_yard', 'back': 'back_yard', 'backyard': 'back_yard',
+          'side_yard_left': 'side_yard_left', 'side yard left': 'side_yard_left', 'side_yard': 'side_yard_left',
+          'side_yard_right': 'side_yard_right', 'side yard right': 'side_yard_right',
+          'left': 'side_yard_left', 'right': 'side_yard_right',
+        };
         for (let i = 0; i < areas.length; i++) {
+          const rawAreaType = (areas[i].area_type || areas[i].type || 'custom').toLowerCase().trim();
+          const mappedAreaType = AREA_TYPE_MAP[rawAreaType] || 'custom';
           await client.query(
             `INSERT INTO property_areas (project_id, area_type, custom_name, sort_order) VALUES ($1, $2, $3, $4)`,
-            [proj.rows[0].id, areas[i].area_type || areas[i].type, areas[i].name, i]
+            [proj.rows[0].id, mappedAreaType, areas[i].name, i]
           );
         }
       }
