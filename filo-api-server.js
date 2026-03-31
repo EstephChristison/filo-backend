@@ -2323,7 +2323,7 @@ app.post('/api/projects/:projectId/estimates/generate', authenticate, async (req
       return { ...est.rows[0], subtotal, tax_amount: taxAmount, total, line_items: lineItems.rows };
     });
 
-    res.json({ estimate });
+    res.status(201).json({ estimate });
   } catch (err) {
     console.error('Estimate generation error:', err);
     res.status(500).json({ error: 'Failed to generate estimate' });
@@ -2514,7 +2514,7 @@ app.post('/api/projects/:projectId/submittals/generate', authenticate, async (re
     await db.query('UPDATE projects SET status = $1 WHERE id = $2', ['submittal_sent', project.id]);
     await logActivity(req.user.companyId, req.user.userId, 'submittal', submittal.id, 'generate', 'Submittal generated');
 
-    res.json(submittal);
+    res.status(201).json(submittal);
   } catch (err) {
     console.error('Submittal generation error:', err);
     res.status(500).json({ error: 'Failed to generate submittal' });
