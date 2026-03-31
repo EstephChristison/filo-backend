@@ -18,7 +18,8 @@ const config = {
   gptModel: process.env.GPT_MODEL || 'gpt-4o',
 };
 
-const openai = new OpenAI({ apiKey: config.openaiKey });
+// Defer instantiation — only create if key is present, avoids crash at import time
+const openai = config.openaiKey ? new OpenAI({ apiKey: config.openaiKey }) : null;
 const replicate = config.replicateToken ? new Replicate({ auth: config.replicateToken }) : null;
 
 // ─── System Prompts ──────────────────────────────────────────────
@@ -157,6 +158,7 @@ export default class AIService {
   // ─── Plant Detection (Step 4) ──────────────────────────────────
 
   async detectPlants(photoUrl, areaId, options = {}) {
+    if (!openai) return { success: false, error: 'OpenAI not configured', plants: [] };
     const { location, usdaZone } = options;
 
     try {
@@ -228,6 +230,7 @@ export default class AIService {
   // ─── Design Generation (Step 6) ────────────────────────────────
 
   async generateDesign(designId, options) {
+    if (!openai) return { success: false, error: 'OpenAI not configured' };
     const {
       photoUrls, sunExposure, designStyle, specialRequests,
       availablePlants, existingPlants, location, lighting, hardscape,
@@ -335,6 +338,7 @@ export default class AIService {
   }
 
   async generatePlantPlan(context) {
+    if (!openai) return { success: false, error: 'OpenAI not configured' };
     try {
       const messages = [
         { role: 'system', content: PROMPTS.LANDSCAPE_ARCHITECT },
@@ -430,24 +434,28 @@ Create a complete plant placement plan using ONLY plants from the available inve
   }
 
   async generateWithDalle(prompt) {
+    // NOTE: Stack spec requires gpt-image-1 via images.generate (not DALL-E 3)
     const response = await openai.images.generate({
-      model: 'dall-e-3',
+      model: 'gpt-image-1',
       prompt,
       n: 1,
-      size: config.imageSize,
-      quality: config.imageQuality,
-      style: 'natural',
+      size: '1536x1024',
+      quality: 'high',
     });
 
-    const imageUrl = response.data[0].url;
-    const revisedPrompt = response.data[0].revised_prompt;
+    const resultData = response.data[0];
+    let imageUrl;
+    if (resultData.b64_json) {
+      // gpt-image-1 returns b64_json by default — convert to data URL
+      imageUrl = `data:image/png;base64,${resultData.b64_json}`;
+    } else {
+      imageUrl = resultData.url;
+    }
 
     return {
       success: true,
       url: imageUrl,
-      provider: 'dall-e-3',
-      revisedPrompt,
-      cost: config.imageQuality === 'hd' ? 0.12 : 0.08,
+      provider: 'gpt-image-1',
     };
   }
 
@@ -484,6 +492,7 @@ Create a complete plant placement plan using ONLY plants from the available inve
   // ─── Chat Commands (Step 7) ────────────────────────────────────
 
   async processDesignChat(command, designId, currentPlants, availablePlants) {
+    if (!openai) return { success: false, message: 'AI service not configured', actions: [] };
     try {
       const response = await openai.chat.completions.create({
         model: config.gptModel,
@@ -542,6 +551,15 @@ Interpret the command and return the action JSON.`,
   // ─── Scope Narrative Generation (Step 9) ───────────────────────
 
   async generateNarrative(context) {
+    if (!openai) {
+      // Return a basic fallback narrative when AI is not configured
+      return {
+        success: true,
+        text: `${context.companyName || 'Our company'} is pleased to present this comprehensive landscape design proposal. The proposed design integrates carefully selected species chosen for their compatibility with the property's conditions and the local climate.`,
+        closing: 'We look forward to bringing this vision to life.',
+        fallback: true,
+      };
+    }
     const {
       companyName, clientName, address, designStyle,
       sunExposure, plants, lighting, hardscape, specialRequests,
@@ -595,6 +613,7 @@ Write the narrative and closing statement as JSON.`,
   // ─── Nursery List Parsing ──────────────────────────────────────
 
   async parseNurseryList(content, fileType) {
+    if (!openai) return { success: false, error: 'OpenAI not configured', plants: [] };
     try {
       const response = await openai.chat.completions.create({
         model: config.gptModel,
@@ -696,7 +715,6 @@ ${typeof content === 'string' ? content.substring(0, 15000) : JSON.stringify(con
   async updateDesignStatus(designId, status, error = null) {
     await this.db.query(
       `UPDATE designs SET generation_status = $1, generation_error = $2,
-       ${status === 'failed' ? '' : 'generation_completed_at = NOW(),'}
        generation_completed_at = ${status === 'failed' ? 'NULL' : 'NOW()'}
        WHERE id = $3`,
       [status, error, designId]
@@ -761,10 +779,14 @@ export function mountAIRoutes(app, aiService, authenticate) {
     };
 
     // Quick API check
-    try {
-      await openai.models.retrieve(config.gptModel);
-      checks.openaiConnected = true;
-    } catch {
+    if (openai) {
+      try {
+        await openai.models.retrieve(config.gptModel);
+        checks.openaiConnected = true;
+      } catch {
+        checks.openaiConnected = false;
+      }
+    } else {
       checks.openaiConnected = false;
     }
 

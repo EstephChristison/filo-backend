@@ -9,20 +9,21 @@
     "dev": "node --watch filo-api-server.js"
   },
   "dependencies": {
-    "express": "^4.21.0",
-    "cors": "^2.8.5",
-    "helmet": "^8.0.0",
-    "morgan": "^1.10.0",
-    "express-rate-limit": "^7.4.0",
-    "multer": "^1.4.5-lts.1",
-    "jsonwebtoken": "^9.0.2",
-    "bcryptjs": "^2.4.3",
-    "uuid": "^10.0.0",
-    "pg": "^8.13.0",
     "aws-sdk": "^2.1692.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.1",
+    "openai": "^6.33.0",
+    "pg": "^8.13.0",
+    "replicate": "^1.0.0",
+    "sharp": "^0.34.5",
     "stripe": "^17.0.0",
-    "openai": "^4.70.0",
-    "replicate": "^1.0.0"
+    "uuid": "^10.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
