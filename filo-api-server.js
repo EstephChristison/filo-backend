@@ -588,7 +588,8 @@ app.put('/api/company', authenticate, requireAdmin, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('PUT /api/company error:', err.message);
-    res.status(500).json({ error: err.message || 'Failed to update company' });
+    if (err.code === '22001') return res.status(400).json({ error: 'One or more fields exceed maximum length' });
+    res.status(500).json({ error: 'Failed to update company' });
   }
 });
 
@@ -689,6 +690,7 @@ app.put('/api/clients/:id', authenticate, async (req, res) => {
     res.json(client);
   } catch (err) {
     console.error('PUT /api/clients/:id error:', err.message);
+    if (err.code === '22001') return res.status(400).json({ error: 'One or more fields exceed maximum length' });
     res.status(500).json({ error: 'Failed to update client' });
   }
 });
@@ -864,7 +866,8 @@ app.put('/api/projects/:id', authenticate, async (req, res) => {
     res.json(project);
   } catch (err) {
     console.error('PUT /api/projects/:id error:', err.message);
-    res.status(500).json({ error: err.message || 'Failed to update project' });
+    if (err.code === '22001') return res.status(400).json({ error: 'One or more fields exceed maximum length' });
+    res.status(500).json({ error: 'Failed to update project' });
   }
 });
 
@@ -1617,6 +1620,7 @@ app.put('/api/plants/:id', authenticate, requireAdmin, async (req, res) => {
     res.json(plant);
   } catch (err) {
     console.error('PUT /api/plants/:id error:', err.message);
+    if (err.code === '22001') return res.status(400).json({ error: 'One or more fields exceed maximum length' });
     res.status(500).json({ error: 'Failed to update plant' });
   }
 });
