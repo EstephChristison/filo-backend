@@ -1556,6 +1556,70 @@ app.post('/api/plants', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+app.get('/api/plants/:id', authenticate, async (req, res) => {
+  try {
+    const plant = await db.getOne(
+      'SELECT * FROM plant_library WHERE id = $1 AND (company_id = $2 OR is_global = true)',
+      [req.params.id, req.user.companyId]
+    );
+    if (!plant) return res.status(404).json({ error: 'Plant not found' });
+    res.json(plant);
+  } catch (err) {
+    console.error('GET /api/plants/:id error:', err.message);
+    res.status(500).json({ error: 'Failed to load plant' });
+  }
+});
+
+app.put('/api/plants/:id', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const p = req.body;
+    const allowed = ['common_name', 'botanical_name', 'category', 'container_size', 'mature_height', 'mature_width',
+      'sun_requirement', 'water_needs', 'usda_zones', 'bloom_color', 'bloom_season', 'foliage_color',
+      'image_url', 'description', 'poetic_description', 'retail_price', 'wholesale_price',
+      'tags', 'is_native', 'is_available', 'sort_order', 'notes'];
+    // Accept camelCase
+    const camelToSnake = { commonName: 'common_name', botanicalName: 'botanical_name', containerSize: 'container_size',
+      matureHeight: 'mature_height', matureWidth: 'mature_width', sunRequirement: 'sun_requirement',
+      waterNeeds: 'water_needs', usdaZones: 'usda_zones', bloomColor: 'bloom_color', bloomSeason: 'bloom_season',
+      foliageColor: 'foliage_color', imageUrl: 'image_url', poeticDescription: 'poetic_description',
+      retailPrice: 'retail_price', wholesalePrice: 'wholesale_price', isNative: 'is_native', isAvailable: 'is_available',
+      sortOrder: 'sort_order' };
+    const normalized = {};
+    for (const [k, v] of Object.entries(p)) {
+      const col = camelToSnake[k] || k;
+      if (allowed.includes(col)) normalized[col] = v;
+    }
+    if (Object.keys(normalized).length === 0) return res.json({ message: 'No fields to update' });
+    const updates = [], values = [];
+    let idx = 1;
+    for (const [col, val] of Object.entries(normalized)) { updates.push(`${col} = $${idx}`); values.push(val); idx++; }
+    values.push(req.params.id, req.user.companyId);
+    const plant = await db.getOne(
+      `UPDATE plant_library SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${idx} AND company_id = $${idx + 1} RETURNING *`,
+      values
+    );
+    if (!plant) return res.status(404).json({ error: 'Plant not found or not owned by your company' });
+    res.json(plant);
+  } catch (err) {
+    console.error('PUT /api/plants/:id error:', err.message);
+    res.status(500).json({ error: 'Failed to update plant' });
+  }
+});
+
+app.delete('/api/plants/:id', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const result = await db.query(
+      'DELETE FROM plant_library WHERE id = $1 AND company_id = $2',
+      [req.params.id, req.user.companyId]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Plant not found or not owned by your company' });
+    res.json({ message: 'Plant deleted' });
+  } catch (err) {
+    console.error('DELETE /api/plants/:id error:', err.message);
+    res.status(500).json({ error: 'Failed to delete plant' });
+  }
+});
+
 app.post('/api/plants/import', authenticate, requireAdmin, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
