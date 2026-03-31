@@ -740,6 +740,7 @@ app.post('/api/projects', authenticate, requireActiveSubscription, async (req, r
     const hardscapeNotes = b.hardscapeNotes || b.hardscape_notes || null;
 
     if (!clientId) return res.status(400).json({ error: 'client_id is required' });
+    if (!UUID_RE.test(clientId)) return res.status(400).json({ error: 'Invalid clientId: must be a valid UUID' });
 
     // Sanitize enum fields — same maps as PUT /api/projects/:id
     const DESIGN_STYLE_MAP = {
