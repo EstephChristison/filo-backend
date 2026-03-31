@@ -2290,8 +2290,8 @@ app.post('/api/projects/:projectId/estimates/generate', authenticate, async (req
         subtotal += svc.price;
       }
 
-      const taxAmount = company.tax_enabled ? subtotal * (parseFloat(company.tax_rate) || 0.0825) : 0;
-      const total = subtotal + taxAmount;
+      const taxAmount = company.tax_enabled ? Math.round(subtotal * (parseFloat(company.tax_rate) || 0.0825) * 100) / 100 : 0;
+      const total = Math.round((subtotal + taxAmount) * 100) / 100;
 
       await client.query(
         'UPDATE estimates SET subtotal = $1, tax_amount = $2, total = $3 WHERE id = $4',
@@ -2324,6 +2324,59 @@ app.get('/api/estimates/:id', authenticate, async (req, res) => {
   }
 });
 
+app.put('/api/estimates/:id', authenticate, async (req, res) => {
+  try {
+    const estimate = await db.getOne('SELECT id FROM estimates WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const allowed = ['notes', 'terms', 'warranty', 'valid_until', 'tax_rate', 'tax_enabled', 'labor_method', 'material_markup'];
+    const updates = [], values = [];
+    let idx = 1;
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) { updates.push(`${key} = $${idx}`); values.push(req.body[key]); idx++; }
+    }
+    if (updates.length === 0) return res.json({ message: 'No fields to update' });
+    values.push(req.params.id);
+    const updated = await db.getOne(`UPDATE estimates SET ${updates.join(', ')} WHERE id = $${idx} RETURNING *`, values);
+    const lineItems = await db.getMany('SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [req.params.id]);
+    res.json({ ...updated, line_items: lineItems });
+  } catch (err) {
+    console.error('PUT /api/estimates/:id error:', err.message);
+    res.status(500).json({ error: 'Failed to update estimate' });
+  }
+});
+
+app.post('/api/estimates/:id/line-items', authenticate, async (req, res) => {
+  try {
+    const estimate = await db.getOne('SELECT * FROM estimates WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const { category, description, quantity = 1, unit = 'ea', unitPrice, notes } = req.body;
+    if (!category || unitPrice === undefined) return res.status(400).json({ error: 'category and unitPrice are required' });
+    const VALID_CATS = ['plant_material', 'labor', 'soil_amendment', 'mulch', 'edging', 'irrigation', 'lighting',
+      'hardscape', 'delivery', 'removal_disposal', 'warranty', 'tax', 'other'];
+    if (!VALID_CATS.includes(category)) return res.status(400).json({ error: `Invalid category. Must be one of: ${VALID_CATS.join(', ')}` });
+    const price = parseFloat(unitPrice);
+    const qty = parseFloat(quantity);
+    if (isNaN(price) || price < 0) return res.status(400).json({ error: 'unitPrice must be a non-negative number' });
+    const totalPrice = Math.round(price * qty * 100) / 100;
+    const maxSort = await db.getOne('SELECT COALESCE(MAX(sort_order), -1) as max FROM estimate_line_items WHERE estimate_id = $1', [req.params.id]);
+    const item = await db.getOne(
+      `INSERT INTO estimate_line_items (estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.params.id, category, description || category, qty, unit, price, totalPrice, (maxSort?.max ?? -1) + 1, notes || null]
+    );
+    // Recalculate totals
+    const items = await db.getMany('SELECT total_price FROM estimate_line_items WHERE estimate_id = $1', [req.params.id]);
+    const subtotal = Math.round(items.reduce((s, i) => s + parseFloat(i.total_price || 0), 0) * 100) / 100;
+    const taxAmount = estimate.tax_enabled ? Math.round(subtotal * parseFloat(estimate.tax_rate || 0) * 100) / 100 : 0;
+    await db.query('UPDATE estimates SET subtotal = $1, tax_amount = $2, total = $3 WHERE id = $4',
+      [subtotal, taxAmount, Math.round((subtotal + taxAmount) * 100) / 100, req.params.id]);
+    res.status(201).json(item);
+  } catch (err) {
+    console.error('POST /api/estimates/:id/line-items error:', err.message);
+    res.status(500).json({ error: 'Failed to add line item' });
+  }
+});
+
 app.put('/api/estimates/:id/line-items/:lineItemId', authenticate, async (req, res) => {
   try {
     // Verify estimate ownership
@@ -2331,12 +2384,15 @@ app.put('/api/estimates/:id/line-items/:lineItemId', authenticate, async (req, r
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
 
     const { unitPrice, quantity, description } = req.body;
-    const price = parseFloat(unitPrice);
-    const qty = parseFloat(quantity);
+    // Fetch existing item to fill in missing values
+    const existing = await db.getOne('SELECT * FROM estimate_line_items WHERE id = $1 AND estimate_id = $2', [req.params.lineItemId, req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Line item not found' });
+    const price = unitPrice !== undefined ? parseFloat(unitPrice) : parseFloat(existing.unit_price);
+    const qty = quantity !== undefined ? parseFloat(quantity) : parseFloat(existing.quantity);
     if (isNaN(price) || isNaN(qty) || price < 0 || qty < 0) {
       return res.status(400).json({ error: 'unitPrice and quantity must be non-negative numbers' });
     }
-    const totalPrice = price * qty;
+    const totalPrice = Math.round(price * qty * 100) / 100;
 
     const item = await db.getOne(
       'UPDATE estimate_line_items SET unit_price = $1, quantity = $2, description = $3, total_price = $4 WHERE id = $5 AND estimate_id = $6 RETURNING *',
@@ -2347,10 +2403,10 @@ app.put('/api/estimates/:id/line-items/:lineItemId', authenticate, async (req, r
     // Recalculate estimate totals
     const items = await db.getMany('SELECT total_price FROM estimate_line_items WHERE estimate_id = $1', [req.params.id]);
     const subtotal = items.reduce((sum, i) => sum + parseFloat(i.total_price || 0), 0);
-    const taxAmount = estimate.tax_enabled ? subtotal * parseFloat(estimate.tax_rate || 0) : 0;
+    const taxAmount = estimate.tax_enabled ? Math.round(subtotal * parseFloat(estimate.tax_rate || 0) * 100) / 100 : 0;
 
     await db.query('UPDATE estimates SET subtotal = $1, tax_amount = $2, total = $3 WHERE id = $4',
-      [subtotal, taxAmount, subtotal + taxAmount, req.params.id]);
+      [subtotal, taxAmount, Math.round((subtotal + taxAmount) * 100) / 100, req.params.id]);
 
     res.json(item);
   } catch (err) {
