@@ -2515,6 +2515,39 @@ app.get('/api/submittals/:id', authenticate, async (req, res) => {
   }
 });
 
+app.put('/api/submittals/:id', authenticate, async (req, res) => {
+  try {
+    const submittal = await db.getOne('SELECT id FROM submittals WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
+    if (!submittal) return res.status(404).json({ error: 'Submittal not found' });
+    const allowed = ['scope_narrative', 'closing_statement', 'warranty_text', 'notes', 'status'];
+    const updates = [], values = [];
+    let idx = 1;
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) { updates.push(`${key} = $${idx}`); values.push(req.body[key]); idx++; }
+    }
+    if (updates.length === 0) return res.json({ message: 'No fields to update' });
+    values.push(req.params.id);
+    const updated = await db.getOne(`UPDATE submittals SET ${updates.join(', ')} WHERE id = $${idx} RETURNING *`, values);
+    const plantProfiles = await db.getMany('SELECT * FROM submittal_plant_profiles WHERE submittal_id = $1 ORDER BY sort_order', [req.params.id]);
+    res.json({ ...updated, plantProfiles });
+  } catch (err) {
+    console.error('PUT /api/submittals/:id error:', err.message);
+    res.status(500).json({ error: 'Failed to update submittal' });
+  }
+});
+
+app.get('/api/projects/:projectId/submittals', authenticate, async (req, res) => {
+  try {
+    const project = await db.getOne('SELECT id FROM projects WHERE id = $1 AND company_id = $2', [req.params.projectId, req.user.companyId]);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const submittals = await db.getMany('SELECT * FROM submittals WHERE project_id = $1 ORDER BY created_at DESC', [req.params.projectId]);
+    res.json(submittals);
+  } catch (err) {
+    console.error('GET /api/projects/:projectId/submittals error:', err.message);
+    res.status(500).json({ error: 'Failed to load submittals' });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════
 // REVISION ROUTES
 // ═══════════════════════════════════════════════════════════════════
