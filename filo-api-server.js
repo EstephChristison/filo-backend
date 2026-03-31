@@ -383,7 +383,11 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
       `SELECT u.*, c.name as company_name, c.onboarding_completed FROM users u JOIN companies c ON c.id = u.company_id WHERE u.email = $1`,
       [email]
     );
-    if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user) {
+      // Constant-time dummy comparison to prevent email enumeration via timing
+      await bcrypt.compare(password, '$2b$12$notarealhashXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX');
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
     if (!user.is_active) return res.status(403).json({ error: 'Account disabled' });
 
     const valid = await bcrypt.compare(password, user.password_hash);
