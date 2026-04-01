@@ -1296,17 +1296,23 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
     const origW = metadata.width;
     const origH = metadata.height;
 
-    console.log('[removal-preview] Calling Gemini for plant removal...');
+    console.log('[removal-preview] Photo dimensions: %dx%d', origW, origH);
+
+    // Resize photo — use fit:contain so output is always exactly 1024x1024
+    // This matches the mask which is always drawn on a 1024x1024 canvas
     const resizedBuffer = await sharp(photoBuffer)
-      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .resize(1024, 1024, { fit: 'contain', background: { r: 0, g: 0, b: 0 } })
       .jpeg({ quality: 85 })
       .toBuffer();
 
-    const maskB64 = maskDataUrl.replace(/^data:image\/png;base64,/, '');
+    // Mask: keep as PNG to preserve sharp black/white edges (JPEG blurs them)
+    const maskB64 = maskDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
     const maskResized = await sharp(Buffer.from(maskB64, 'base64'))
-      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 85 })
+      .resize(1024, 1024, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+      .png()
       .toBuffer();
+
+    console.log('[removal-preview] Mask size: %dKB (PNG, sharp edges preserved)', Math.round(maskResized.length / 1024));
 
     const response = await googleAI.models.generateContent({
       model: 'gemini-2.5-flash-image',
@@ -1316,9 +1322,14 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
           parts: [
             { text: 'Here is the original property photo:' },
             { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
-            { text: 'Here is a mask showing the areas to edit (dark/black areas are the plants to remove):' },
-            { inlineData: { mimeType: 'image/jpeg', data: maskResized.toString('base64') } },
-            { text: 'STRICT EDIT CONSTRAINT: Only modify pixels inside the black/dark mask regions. Every pixel outside the mask must remain byte-for-byte identical to the original photo — do NOT move, recolor, remove, resize, or alter anything outside the mask boundary. Inside the masked areas only: erase the vegetation and fill with whatever surface is directly adjacent — mulch, soil, concrete, brick, siding, grass — continuing its exact texture, color, grain, and shadow seamlessly. The result must look like those specific plants were never there. Zero changes outside the mask.' },
+            { text: 'Here is a mask image. BLACK areas = plants to REMOVE. WHITE areas = DO NOT TOUCH.' },
+            { inlineData: { mimeType: 'image/png', data: maskResized.toString('base64') } },
+            { text: `STRICT EDIT RULES:
+1. ONLY modify pixels where the mask is BLACK. These are the plants the client wants removed.
+2. Every pixel where the mask is WHITE must remain IDENTICAL to the original photo — zero changes. Do not move, recolor, remove, resize, or alter anything in white mask areas.
+3. Inside the BLACK mask areas only: erase the vegetation completely and fill with the surface that is directly adjacent — mulch, soil, concrete, brick, siding, or grass — continuing its exact texture, color, grain, and shadow seamlessly.
+4. The result must look like those specific plants were never planted there.
+5. Do NOT remove or modify any plants that are in WHITE mask areas, even if they are close to a black area. Only the black areas get edited.` },
           ],
         },
       ],
@@ -1337,13 +1348,22 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
     const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
     console.log('[removal-preview] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
-    const finalBuffer = await sharp(resultBuffer)
+    // Extract the photo region from the 1024x1024 contain result (remove letterbox padding)
+    const resultMeta = await sharp(resultBuffer).metadata();
+    const scale = Math.min(1024 / origW, 1024 / origH);
+    const scaledW = Math.round(origW * scale);
+    const scaledH = Math.round(origH * scale);
+    const offsetX = Math.round((1024 - scaledW) / 2);
+    const offsetY = Math.round((1024 - scaledH) / 2);
+
+    const croppedBuffer = await sharp(resultBuffer)
+      .extract({ left: offsetX, top: offsetY, width: Math.min(scaledW, resultMeta.width - offsetX), height: Math.min(scaledH, resultMeta.height - offsetY) })
       .resize(origW, origH, { fit: 'fill' })
       .jpeg({ quality: 92 })
       .toBuffer();
 
-    const resultDataUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
-    console.log('[removal-preview] Complete:', Math.round(finalBuffer.length / 1024), 'KB');
+    const resultDataUrl = `data:image/jpeg;base64,${croppedBuffer.toString('base64')}`;
+    console.log('[removal-preview] Complete:', Math.round(croppedBuffer.length / 1024), 'KB');
     res.json({ previewUrl: resultDataUrl });
   } catch (err) {
     console.error('[removal-preview] Error:', err.message);
