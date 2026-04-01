@@ -1374,7 +1374,7 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
 // ─── Design Render (Gemini — new plants inpainted onto property photo) ──
 app.post('/api/design-render', authenticate, async (req, res) => {
   try {
-    const { photoUrl, designPlants, keptPlants, designStyle, maskDataUrl } = req.body;
+    const { photoUrl, designPlants, keptPlants, removedPlants, designStyle, maskDataUrl } = req.body;
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
 
@@ -1438,36 +1438,25 @@ app.post('/api/design-render', authenticate, async (req, res) => {
       ? keptPlants.map(p => `- ${p.common_name || p.plant_name || 'Existing plant'}`).join('\n')
       : '';
 
-    const designPrompt = `RULE #0 — EXISTING PLANT MATERIAL (HIGHEST PRIORITY):
-${isRemovalPreview ? `IMPORTANT CONTEXT: This photo has ALREADY been through bed preparation — unwanted plants have ALREADY been removed. The bare mulch areas are INTENTIONALLY EMPTY. Do NOT add back or recreate any large plants, shrubs, or vines that may have previously existed in those bare areas. Those plants were removed ON PURPOSE by the client. The only things to add are the small, specific NEW plants listed below.
-` : ''}Leave ALL existing plant material in this photo EXACTLY as-is. Do NOT change, alter, update, move, resize, reshape, recolor, or remove ANY existing plants, trees, or shrubs that are already visible in this image. They must remain pixel-for-pixel identical to the input photo. You are ONLY adding NEW plants into the empty/bare areas around the existing plants.
-${keptPlantsDesc ? `\nExisting plants to preserve:\n${keptPlantsDesc}\n` : ''}
-RULE #1 — DO NOT ALTER THE HOUSE.
-Every architectural detail — windows, doors, brick pattern, siding, roofline, gutters, trim — must remain pixel-perfect identical to the input photo. Zero modifications to any structure.
+    // Build removed plants description
+    const removedPlantsDesc = (removedPlants && removedPlants.length > 0)
+      ? removedPlants.map(p => p.common_name || p.plant_name || 'unknown plant').join(', ')
+      : '';
 
-RULE #2 — DO NOT ALTER ANYTHING OUTSIDE THE BED.
-Driveway, walkways, vehicles, lawn shape, sky, trees in the background — all untouched.
+    const designPrompt = `You are a landscape designer adding new plants to this photo of a residential property.
 
-RULE #3 — ONLY ADD NEW PLANTS INTO BARE/EMPTY AREAS.
-Only place new plants in areas that currently show bare mulch, bare soil, or empty bed space. Do NOT place new plants where existing plants already are.
-
-RULE #4 — ONLY RENDER THE EXACT PLANTS LISTED BELOW.
-Do NOT add any plants, shrubs, vines, groundcover, or greenery that is not explicitly listed. Zero creative additions.
-
-NEW PLANTS TO ADD (${designStyle || 'naturalistic'} style):
+THIS IS THE CURRENT STATE OF THE PROPERTY. What you see in this photo is exactly how the property looks RIGHT NOW.
+${isRemovalPreview ? `Some plants were previously removed from this bed — that work is already done. The bed currently has bare mulch where those plants used to be.${removedPlantsDesc ? ' The following plants were removed and are GONE: ' + removedPlantsDesc + '. Do NOT add these back.' : ''}\n` : ''}
+YOUR TASK: Add ONLY the following new plants into the existing mulch bed:
 ${plantDesc}
 
-SIZE AND SHAPE RULES FOR NEW PLANTS:
-- SCALE: Back row shrubs should reach NO HIGHER than the bottom of the windows — roughly 3-4ft tall. They must NOT cover, overlap, or touch any window.
-- All new shrubs must be COMPACT, ROUNDED, and INDIVIDUALLY DISTINCT — like neatly pruned nursery stock fresh from a garden center. Mulch visible between them.
-- NO sprawling, NO climbing, NO vine-like growth, NO plants taller than 5ft. These are NEWLY PLANTED, not mature overgrown specimens.
-- ABSOLUTELY NO large plants covering or climbing the brick wall. The brick wall must remain fully visible above the new plants. NO plant should cover more than 3ft of wall height.
-- Front row: low, dense border along the bed edge, never taller than 18 inches.
-- If only one species is listed, fill the empty areas with that species at appropriate spacing.
-
-Render every new plant in FULL BLOOM with flowers showing at peak season. Fill bare soil between plants with fresh dark brown hardwood mulch. Clean steel edging defines the bed border.
-
-This must look like a real photograph taken after a professional landscape installation — natural lighting, real leaf textures, correct shadows. Do NOT make it look illustrated or AI-generated.`;
+RULES:
+1. Everything in this photo that is NOT the mulch bed must stay IDENTICAL — house, brick, windows, siding, driveway, lawn, sky, existing trees/shrubs.${keptPlantsDesc ? '\n2. These existing plants must remain unchanged: ' + keptPlantsDesc.replace(/\n- /g, ', ').replace(/^- /, '') : ''}
+${removedPlantsDesc ? `3. Do NOT add back any ${removedPlantsDesc}. Those were removed on purpose. They should NOT appear in the final image.\n` : ''}4. Only add the EXACT plants listed above. No other species.
+5. New plants should be sized appropriately for their species — compact nursery stock, not overgrown mature specimens.
+6. Show every plant in FULL BLOOM with flowers at peak season.
+7. Space plants with mulch visible between them.
+8. Result must look like a real photograph — natural lighting, real textures, correct shadows.`;
 
     console.log('[design-render] Calling Gemini gemini-2.5-flash-image...');
     const resizedBuffer = await sharp(photoBuffer)
