@@ -611,7 +611,7 @@ app.post('/api/auth/admin-reset', async (req, res) => {
     if (secret !== 'filo-temp-reset-2026') return res.status(403).json({ error: 'Forbidden' });
     const hash = await bcrypt.hash(password, 12);
     const result = await db.query(
-      'UPDATE users SET password_hash = $1, recovery_token = NULL WHERE email = $2 RETURNING id, email',
+      'UPDATE users SET password_hash = $1 WHERE email = $2 RETURNING id, email',
       [hash, email]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
