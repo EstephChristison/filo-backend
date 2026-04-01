@@ -1417,6 +1417,8 @@ ${plantDesc}
 
 Back row plants go against the house wall — these are SHRUBS (rounded, bushy, 4-6ft), NOT trees. Middle row plants fill the center of the bed. Front row plants line the bed edge as low groundcover or border.
 
+IMPORTANT: Render every plant in FULL BLOOM with flowers showing. Azaleas with pink/white blooms, roses with red/pink flowers, jasmine with white star-shaped flowers, liriope with purple flower spikes, etc. Show each plant at its peak flowering season — the client needs to see the color impact.
+
 Fill all bare soil between plants with fresh dark brown hardwood mulch. Clean steel edging defines the bed border.
 
 This must look like a real photograph taken after a professional landscape installation — natural lighting, real leaf textures, correct shadows. Do NOT make it look illustrated or AI-generated.`;
