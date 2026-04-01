@@ -1423,10 +1423,10 @@ EXACT PLANT LIST TO RENDER (${designStyle || 'naturalistic'} style):
 ${plantDesc}
 
 CRITICAL SIZE AND SHAPE RULES:
-- NO plant may exceed its listed height. A "4-6 ft" shrub must NOT reach the roofline or cover windows.
-- All shrubs must be COMPACT and ROUNDED — like neatly pruned nursery stock. No sprawling, no climbing, no vine-like growth.
+- SCALE REFERENCE: A typical residential window is about 4ft off the ground. Back row shrubs should reach NO HIGHER than the bottom of the windows — roughly 3-4ft tall in the image. They must NOT cover, overlap, or touch any window.
+- All shrubs must be COMPACT, ROUNDED, and INDIVIDUALLY DISTINCT — like neatly pruned nursery stock fresh from a garden center. Each plant should be clearly separate from its neighbors with mulch visible between them.
+- NO sprawling, NO climbing, NO vine-like growth, NO plants taller than 5ft. These are NEWLY PLANTED shrubs, not mature overgrown specimens.
 - Do NOT recreate or mimic any plants that were previously in the photo. Render ONLY the listed species.
-- Back row: evenly spaced rounded shrubs against the wall, tops well below any windows.
 - Front row: low, dense border along the bed edge, never taller than 18 inches.
 - If only one species is listed, fill the entire bed with that single species at appropriate spacing.
 
@@ -2038,18 +2038,18 @@ app.post('/api/projects/:projectId/designs/generate', authenticate, requireActiv
                 messages: [
                   {
                     role: 'system',
-                    content: `You are an expert landscape designer's internal prompt translator. Your job is to take a homeowner's casual plant/design request and translate it into precise, professional landscape specifications that another AI will use to generate a full design.
+                    content: `You are an expert landscape designer's internal prompt translator. Your job is to take a homeowner's casual plant/design request and translate it into precise, professional landscape specifications.
 
-Rules:
-- Expand vague requests into specific botanical names, cultivar names, container sizes, and quantities
-- Add professional spacing, mature height/width, and placement guidance
-- Add complementary companion plants that pair well with what the client asked for
+CRITICAL RULES:
+- ONLY use the plants the client mentioned. Do NOT add companion plants, filler plants, or complementary species.
+- If the client says "azaleas" — your output should ONLY reference azaleas. Zero additions.
+- Expand the client's named plants into specific botanical names, cultivar names, container sizes, and recommended quantities
+- Add professional spacing, mature height/width, and placement guidance for the plants they asked for
 - Factor in the site conditions: USDA Zone ${zone}, ${sunExposureLabel} exposure, ${styleLabel} style
 - If the client names a plant that won't thrive in these conditions, suggest the closest viable alternative and explain why
-- Add seasonal interest notes (bloom time, fall color, evergreen vs deciduous)
-- Keep the client's original intent — don't override their preferences, enhance them
+- NEVER add plants the client did not ask for. Your job is to refine their request, not expand it.
 - Output ONLY the enhanced specification text, no preamble or explanation
-- Be concise but thorough — 3-6 sentences max`
+- Be concise — 2-4 sentences max`
                   },
                   {
                     role: 'user',
@@ -2092,11 +2092,11 @@ Plants being removed: ${removePlants || 'none'}`
 
           // Build style-specific guidance
           const styleGuide = {
-            formal: 'FORMAL/SYMMETRICAL style — mirror plant placement left-to-right, use clipped hedges (Boxwood, Dwarf Yaupon, Ligustrum), geometric spacing, clean lines. Monochromatic or limited color palette.',
-            naturalistic: 'NATURALISTIC/COTTAGE style — flowing curves, mixed textures, layered heights that look organic. Use ornamental grasses, perennials, and flowering shrubs in drifts. Relaxed but intentional.',
-            modern: 'MODERN/MINIMALIST style — clean architectural lines, limited plant palette (3-4 species max), bold single-species masses, structural plants like Agave, ornamental grasses, and clipped specimens. Negative space is part of the design.',
-            tropical: 'TROPICAL style — lush, dense, layered foliage with bold leaf textures. Palms, Bird of Paradise, Plumbago, Crotons, Elephant Ears, Banana. Year-round green density is the goal.',
-            xeriscape: 'XERISCAPE/DROUGHT-TOLERANT style — native and adapted plants that need minimal irrigation once established. Yucca, Agave, Salvia, Lantana, Gulf Muhly, Mexican Bush Sage, Texas Sage. Rock mulch and decomposed granite accents.',
+            formal: 'FORMAL/SYMMETRICAL style — mirror plant placement left-to-right, geometric spacing, clean lines. Monochromatic or limited color palette.',
+            naturalistic: 'NATURALISTIC/COTTAGE style — flowing curves, mixed textures, layered heights that look organic. Relaxed but intentional.',
+            modern: 'MODERN/MINIMALIST style — clean architectural lines, limited species, bold single-species masses. Negative space is part of the design.',
+            tropical: 'TROPICAL style — lush, dense, layered foliage with bold leaf textures. Year-round green density is the goal.',
+            xeriscape: 'XERISCAPE/DROUGHT-TOLERANT style — native and adapted plants that need minimal irrigation once established.',
           };
 
           const sunExposure = project.sun_exposure || 'full_sun';
