@@ -218,7 +218,7 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(morgan('combined'));
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 });
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
 app.use('/api/', limiter);
 
 // Validate all UUID route params before hitting the DB (prevents 502 on bad UUIDs)
@@ -228,6 +228,8 @@ registerUUIDParamValidation(app);
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { error: 'Too many auth attempts. Please wait 15 minutes and try again.' },
 });
 
@@ -2895,6 +2897,8 @@ async function triggerCrmSync(companyId, entityType, entityId, action, data) {
 const aiRateLimit = rateLimit({
   windowMs: 60 * 1000,
   max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { error: 'Too many AI requests, please wait a moment' },
 });
 
@@ -3391,6 +3395,15 @@ if (MISSING_ENV.length > 0) {
 if (!config.jwtSecret || !config.jwtRefreshSecret) {
   console.error('FATAL: JWT_SECRET and JWT_REFRESH_SECRET must be set. Server cannot start safely.');
   process.exit(1);
+}
+
+const OPTIONAL_ENV = [
+  ['STRIPE_BASE_PRICE_ID', 'Stripe base subscription price — billing endpoints will error without it'],
+  ['STRIPE_USER_PRICE_ID', 'Stripe per-user price — billing endpoints will error without it'],
+  ['GPT_MODEL', 'OpenAI model override — defaults to gpt-4o'],
+];
+for (const [key, note] of OPTIONAL_ENV) {
+  if (!process.env[key]) console.warn(`ℹ️  Optional env not set: ${key} — ${note}`);
 }
 
 // ─── Global Unhandled Rejection Safety Net ───────────────────────
