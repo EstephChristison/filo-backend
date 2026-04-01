@@ -1318,7 +1318,7 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
             { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
             { text: 'Here is a mask showing the areas to edit (dark/black areas are the plants to remove):' },
             { inlineData: { mimeType: 'image/jpeg', data: maskResized.toString('base64') } },
-            { text: 'Remove the marked/highlighted plants from this landscape photo. Fill the areas where plants were removed with what would realistically be behind them — continue the surrounding materials like brick, siding, mulch, soil, or grass seamlessly. Match the exact color temperature, shadow direction, and surface texture. Preserve everything else in the photo exactly as it is.' },
+            { text: 'STRICT EDIT CONSTRAINT: Only modify pixels inside the black/dark mask regions. Every pixel outside the mask must remain byte-for-byte identical to the original photo — do NOT move, recolor, remove, resize, or alter anything outside the mask boundary. Inside the masked areas only: erase the vegetation and fill with whatever surface is directly adjacent — mulch, soil, concrete, brick, siding, grass — continuing its exact texture, color, grain, and shadow seamlessly. The result must look like those specific plants were never there. Zero changes outside the mask.' },
           ],
         },
       ],
