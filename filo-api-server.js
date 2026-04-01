@@ -557,6 +557,100 @@ app.post('/api/auth/accept-invite', async (req, res) => {
   }
 });
 
+// ─── Forgot Password (Request Reset) ────────────────────────────
+app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
+  try {
+    const email = (req.body.email || '').trim().toLowerCase();
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    // Always return success to prevent email enumeration
+    const user = await db.getOne('SELECT id, email FROM users WHERE email = $1', [email]);
+    if (user) {
+      const crypto = await import('crypto');
+      const token = crypto.randomUUID();
+      const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+      await db.query(
+        'UPDATE users SET recovery_token = $1, recovery_sent_at = $2 WHERE id = $3',
+        [token, expires, user.id]
+      );
+      // TODO: Send actual email when email provider is configured
+      console.log(`[PASSWORD RESET] Token for ${email}: ${token} (expires ${expires.toISOString()})`);
+    }
+    res.json({ message: 'If an account with that email exists, a reset link has been sent.' });
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    res.status(500).json({ error: 'Failed to process request' });
+  }
+});
+
+// ─── Reset Password (with token) ───────────────────────────────
+app.post('/api/auth/reset-password', authLimiter, async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || !password) return res.status(400).json({ error: 'Token and new password are required' });
+    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+
+    const user = await db.getOne(
+      'SELECT id, email FROM users WHERE recovery_token = $1 AND recovery_sent_at > NOW()',
+      [token]
+    );
+    if (!user) return res.status(400).json({ error: 'Invalid or expired reset token' });
+
+    const hash = await bcrypt.hash(password, 12);
+    await db.query(
+      'UPDATE users SET password_hash = $1, recovery_token = NULL, recovery_sent_at = NULL WHERE id = $2',
+      [hash, user.id]
+    );
+    // Revoke all refresh tokens for security
+    await db.query('UPDATE refresh_tokens SET revoked = true WHERE user_id = $1', [user.id]);
+
+    res.json({ message: 'Password has been reset. You can now sign in.' });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: 'Failed to reset password' });
+  }
+});
+
+// ─── Forgot Email (Lookup by name/phone) ────────────────────────
+app.post('/api/auth/forgot-email', authLimiter, async (req, res) => {
+  try {
+    const firstName = stripHtml((req.body.firstName || '').trim());
+    const lastName = stripHtml((req.body.lastName || '').trim());
+    const phone = stripHtml((req.body.phone || '').trim());
+
+    if (!firstName && !lastName && !phone) {
+      return res.status(400).json({ error: 'Provide your name or phone number' });
+    }
+
+    let query = 'SELECT email FROM users WHERE 1=1';
+    const params = [];
+    if (firstName) { params.push(firstName.toLowerCase()); query += ` AND LOWER(first_name) = $${params.length}`; }
+    if (lastName) { params.push(lastName.toLowerCase()); query += ` AND LOWER(last_name) = $${params.length}`; }
+    if (phone) { params.push(phone.replace(/\D/g, '')); query += ` AND REPLACE(phone, '-', '') LIKE '%' || $${params.length} || '%'`; }
+
+    const users = await db.getMany(query, params);
+    if (users.length === 0) {
+      return res.json({ maskedEmails: [], message: 'No accounts found matching that information.' });
+    }
+
+    // Mask emails: show first char, last char before @, domain first char, TLD
+    const maskedEmails = users.map(u => {
+      const [local, domain] = u.email.split('@');
+      const maskedLocal = local.length <= 2
+        ? local[0] + '***'
+        : local[0] + '***' + local[local.length - 1];
+      const domParts = domain.split('.');
+      const maskedDomain = domParts[0][0] + '***' + '.' + domParts.slice(1).join('.');
+      return maskedLocal + '@' + maskedDomain;
+    });
+
+    res.json({ maskedEmails, message: `Found ${maskedEmails.length} account(s) matching your info.` });
+  } catch (err) {
+    console.error('Forgot email error:', err);
+    res.status(500).json({ error: 'Failed to look up account' });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════
 // COMPANY ROUTES
 // ═══════════════════════════════════════════════════════════════════
@@ -671,10 +765,19 @@ app.get('/api/clients', authenticate, requireActiveSubscription, async (req, res
 app.post('/api/clients', authenticate, requireActiveSubscription, async (req, res) => {
   try {
     const b = req.body;
+
+    // --- Issue 1 fix: Require at least one identifying field ---
+    const rawFirstName = (b.firstName || '').trim();
+    const rawLastName = (b.lastName || '').trim();
+    const rawCompanyName = (b.companyName || '').trim();
+    const rawName = (b.name || '').trim();
+    if (!rawFirstName && !rawLastName && !rawCompanyName && !rawName) {
+      return res.status(400).json({ error: 'At least one of firstName, lastName, or companyName is required' });
+    }
+
     // Accept both frontend shorthand (name/address) and full field names
-    const displayName = stripHtml(b.displayName || b.name || 'Unnamed Client');
-    const firstName = stripHtml(b.firstName || (b.name ? b.name.split(' ')[0] : null));
-    const lastName = stripHtml(b.lastName || (b.name && b.name.split(' ').length > 1 ? b.name.split(' ').slice(1).join(' ') : null));
+    const firstName = stripHtml(rawFirstName || (rawName ? rawName.split(' ')[0] : null));
+    const lastName = stripHtml(rawLastName || (rawName && rawName.split(' ').length > 1 ? rawName.split(' ').slice(1).join(' ') : null));
     const email = b.email ? b.email.trim().toLowerCase() : null;
     const phone = b.phone || null;
     const addressLine1 = stripHtml(b.addressLine1 || b.address || null);
@@ -682,6 +785,22 @@ app.post('/api/clients', authenticate, requireActiveSubscription, async (req, re
     const state = stripHtml(b.state || null);
     const zip = b.zip || null;
     const notes = stripHtml(b.notes || null);
+
+    // --- Issue 2 fix: Build display_name from actual data ---
+    let displayName;
+    if (firstName && lastName) {
+      displayName = `${firstName} ${lastName}`;
+    } else if (firstName) {
+      displayName = firstName;
+    } else if (lastName) {
+      displayName = lastName;
+    } else if (rawCompanyName) {
+      displayName = stripHtml(rawCompanyName);
+    } else if (email) {
+      displayName = email;
+    } else {
+      displayName = 'Unnamed Client'; // Should never reach here due to validation above
+    }
 
     const client = await db.getOne(
       `INSERT INTO clients (company_id, display_name, first_name, last_name, email, phone, address_line1, city, state, zip, notes)
@@ -3383,7 +3502,7 @@ app.use((err, req, res, next) => {
 
 // ─── Startup Environment Checks ──────────────────────────────────
 
-const REQUIRED_ENV = ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'OPENAI_API_KEY', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'];
+const REQUIRED_ENV = ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'OPENAI_API_KEY'];
 const MISSING_ENV = REQUIRED_ENV.filter(k => !process.env[k]);
 if (MISSING_ENV.length > 0) {
   console.warn(`⚠️  Missing environment variables: ${MISSING_ENV.join(', ')}`);
@@ -3398,6 +3517,8 @@ if (!config.jwtSecret || !config.jwtRefreshSecret) {
 }
 
 const OPTIONAL_ENV = [
+  ['STRIPE_SECRET_KEY', 'Stripe secret key — billing/subscription endpoints will be disabled'],
+  ['STRIPE_WEBHOOK_SECRET', 'Stripe webhook secret — webhook verification will be disabled'],
   ['STRIPE_BASE_PRICE_ID', 'Stripe base subscription price — billing endpoints will error without it'],
   ['STRIPE_USER_PRICE_ID', 'Stripe per-user price — billing endpoints will error without it'],
   ['GPT_MODEL', 'OpenAI model override — defaults to gpt-4o'],
