@@ -609,12 +609,14 @@ app.post('/api/auth/admin-reset', async (req, res) => {
   try {
     const { email, password, secret } = req.body;
     if (secret !== 'filo-temp-reset-2026') return res.status(403).json({ error: 'Forbidden' });
+    // Debug: list all user emails
+    const allUsers = await db.getMany('SELECT id, email FROM users LIMIT 20');
     const hash = await bcrypt.hash(password, 12);
     const result = await db.query(
       'UPDATE users SET password_hash = $1 WHERE LOWER(email) = LOWER($2) RETURNING id, email',
       [hash, email]
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found', emails: allUsers.map(u => u.email) });
     res.json({ message: 'Password reset', user: result.rows[0].email });
   } catch (err) {
     res.status(500).json({ error: err.message });
