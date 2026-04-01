@@ -1354,7 +1354,7 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
 // ─── Design Render (Gemini — new plants inpainted onto property photo) ──
 app.post('/api/design-render', authenticate, async (req, res) => {
   try {
-    const { photoUrl, designPlants, designStyle, maskDataUrl } = req.body;
+    const { photoUrl, designPlants, keptPlants, designStyle, maskDataUrl } = req.body;
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
 
@@ -1421,7 +1421,11 @@ app.post('/api/design-render', authenticate, async (req, res) => {
 
 EXACT PLANT LIST TO RENDER (${designStyle || 'naturalistic'} style):
 ${plantDesc}
-
+${(keptPlants && keptPlants.length > 0) ? `
+PRESERVED PLANTS — DO NOT TOUCH:
+The following plants are ALREADY in the photo and must remain COMPLETELY UNCHANGED. Do not move them, resize them, change their species, alter their shape, or modify them in any way. They must appear pixel-identical to how they look in the input image:
+${keptPlants.map(p => `- ${p.common_name || p.plant_name || 'Existing plant'} (position: ${Math.round(p.position_x || 50)}% from left, ${Math.round(p.position_y || 50)}% from top)`).join('\n')}
+` : ''}
 CRITICAL SIZE AND SHAPE RULES:
 - SCALE REFERENCE: A typical residential window is about 4ft off the ground. Back row shrubs should reach NO HIGHER than the bottom of the windows — roughly 3-4ft tall in the image. They must NOT cover, overlap, or touch any window.
 - All shrubs must be COMPACT, ROUNDED, and INDIVIDUALLY DISTINCT — like neatly pruned nursery stock fresh from a garden center. Each plant should be clearly separate from its neighbors with mulch visible between them.
@@ -2101,7 +2105,7 @@ Plants being removed: ${removePlants || 'none'}`
 
           const sunExposure = project.sun_exposure || 'full_sun';
           const designStyle = project.design_style || 'naturalistic';
-          const maxSpecies = parseInt(project.max_species) || 3;
+          const maxSpecies = parseInt(req.body?.maxSpecies) || parseInt(project.max_species) || 3;
 
           let userPrompt = `Design a complete ${designStyle} landscape renovation for this property. Return your response as JSON.
 
@@ -2209,8 +2213,25 @@ Return ONLY valid JSON with this exact structure:
             designPlants = parsed.plants || parsed.design || [];
             console.log('[design-gen] Used fallback, found:', designPlants.length, 'plants');
           }
+          // HARD ENFORCE species limit — if AI returned more species than requested, trim
+          if (designPlants.length > maxSpecies) {
+            console.log('[design-gen] AI returned %d species but max is %d — trimming', designPlants.length, maxSpecies);
+            // Keep the species with the highest quantities (most important to the design)
+            const speciesMap = {};
+            for (const dp of designPlants) {
+              const key = dp.common_name || dp.botanical_name;
+              if (!speciesMap[key]) speciesMap[key] = { name: key, totalQty: 0, items: [] };
+              speciesMap[key].totalQty += (dp.quantity || 1);
+              speciesMap[key].items.push(dp);
+            }
+            const sorted = Object.values(speciesMap).sort((a, b) => b.totalQty - a.totalQty);
+            const keepSpecies = new Set(sorted.slice(0, maxSpecies).map(s => s.name));
+            designPlants = designPlants.filter(dp => keepSpecies.has(dp.common_name || dp.botanical_name));
+            console.log('[design-gen] Trimmed to %d species: %s', maxSpecies, [...keepSpecies].join(', '));
+          }
+
           const actualTotal = designPlants.reduce((s, p) => s + (p.quantity || 1), 0);
-          console.log('[design-gen] Total designPlants: %d species, %d individual plants', designPlants.length, actualTotal);
+          console.log('[design-gen] Total designPlants: %d species, %d individual plants (maxSpecies=%d)', designPlants.length, actualTotal, maxSpecies);
 
           // Save design plants + narrative in design_data JSONB (design_plants table requires plant_library FK)
           await db.query(
