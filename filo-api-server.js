@@ -610,14 +610,12 @@ app.post('/api/auth/admin-reset', async (req, res) => {
   try {
     const { email, password, secret } = req.body;
     if (secret !== 'filo-temp-reset-2026') return res.status(403).json({ error: 'Forbidden' });
-    // Debug: list all user emails
-    const allUsers = await db.getMany('SELECT id, email FROM users LIMIT 20');
     const hash = await bcrypt.hash(password, 12);
     const result = await db.query(
       'UPDATE users SET password_hash = $1 WHERE LOWER(email) = LOWER($2) RETURNING id, email',
       [hash, email]
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found', emails: allUsers.map(u => u.email) });
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     res.json({ message: 'Password reset', user: result.rows[0].email });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1260,10 +1258,10 @@ app.put('/api/existing-plants/:id/mark', authenticate, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// ─── Removal Preview (Gemini primary, gpt-image-1 fallback — removes plants from photo) ─
+// ─── Removal Preview (Gemini — removes plants from photo) ────────
 app.post('/api/removal-preview', authenticate, async (req, res) => {
   try {
-    if (!googleAI && !openaiClient) return res.status(503).json({ error: 'AI service not configured' });
+    if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
     const { photoUrl, maskDataUrl } = req.body;
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
     if (!maskDataUrl) return res.status(400).json({ error: 'Draw on the photo first to mark areas for removal' });
@@ -1298,115 +1296,46 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
     const origW = metadata.width;
     const origH = metadata.height;
 
-    const removalPrompt = 'Remove the marked/highlighted plants from this landscape photo. Fill the areas where plants were removed with what would realistically be behind them — continue the surrounding materials like brick, siding, mulch, soil, or grass seamlessly. Match the exact color temperature, shadow direction, and surface texture. Preserve everything else in the photo exactly as it is.';
+    console.log('[removal-preview] Calling Gemini for plant removal...');
+    const resizedBuffer = await sharp(photoBuffer)
+      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
 
-    let resultBuffer;
+    const maskB64 = maskDataUrl.replace(/^data:image\/png;base64,/, '');
+    const maskResized = await sharp(Buffer.from(maskB64, 'base64'))
+      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
 
-    // Try Gemini first
-    if (googleAI) {
-      console.log('[removal-preview] Calling Gemini for plant removal...');
-      try {
-        const resizedBuffer = await sharp(photoBuffer)
-          .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
-          .jpeg({ quality: 85 })
-          .toBuffer();
-
-        // Also send the mask as a second image for context
-        const maskB64 = maskDataUrl.replace(/^data:image\/png;base64,/, '');
-        const maskResized = await sharp(Buffer.from(maskB64, 'base64'))
-          .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
-          .jpeg({ quality: 85 })
-          .toBuffer();
-
-        const response = await googleAI.models.generateContent({
-          model: 'gemini-2.0-flash-preview-image-generation',
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                { text: 'Here is the original property photo:' },
-                { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
-                { text: 'Here is a mask showing the areas to edit (dark/black areas are the plants to remove):' },
-                { inlineData: { mimeType: 'image/jpeg', data: maskResized.toString('base64') } },
-                { text: removalPrompt },
-              ],
-            },
+    const response = await googleAI.models.generateContent({
+      model: 'gemini-2.0-flash-preview-image-generation',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: 'Here is the original property photo:' },
+            { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
+            { text: 'Here is a mask showing the areas to edit (dark/black areas are the plants to remove):' },
+            { inlineData: { mimeType: 'image/jpeg', data: maskResized.toString('base64') } },
+            { text: 'Remove the marked/highlighted plants from this landscape photo. Fill the areas where plants were removed with what would realistically be behind them — continue the surrounding materials like brick, siding, mulch, soil, or grass seamlessly. Match the exact color temperature, shadow direction, and surface texture. Preserve everything else in the photo exactly as it is.' },
           ],
-          config: {
-            responseModalities: ['image', 'text'],
-          },
-        });
+        },
+      ],
+      config: {
+        responseModalities: ['image', 'text'],
+      },
+    });
 
-        const parts = response.candidates?.[0]?.content?.parts || [];
-        const imagePart = parts.find(p => p.inlineData);
-        if (imagePart?.inlineData?.data) {
-          resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
-          console.log('[removal-preview] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
-        } else {
-          throw new Error('Gemini returned no image data');
-        }
-      } catch (geminiErr) {
-        console.warn('[removal-preview] Gemini failed:', geminiErr.message, '— falling back to gpt-image-1');
-        resultBuffer = null;
-      }
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    const imagePart = parts.find(p => p.inlineData);
+    if (!imagePart?.inlineData?.data) {
+      const textPart = parts.find(p => p.text);
+      throw new Error(textPart?.text || 'Gemini returned no image data');
     }
 
-    // Fallback to gpt-image-1
-    if (!resultBuffer && openaiClient) {
-      console.log('[removal-preview] Falling back to gpt-image-1...');
-      const SQ = 1024;
-      const { data: sqPixels } = await sharp(photoBuffer)
-        .resize(SQ, SQ, { fit: 'fill' }).ensureAlpha().raw()
-        .toBuffer({ resolveWithObject: true });
-
-      const base64Data = maskDataUrl.replace(/^data:image\/png;base64,/, '');
-      const rawMask = Buffer.from(base64Data, 'base64');
-      const { data: sqMask } = await sharp(rawMask)
-        .resize(SQ, SQ, { fit: 'fill' }).ensureAlpha().raw()
-        .toBuffer({ resolveWithObject: true });
-
-      let maskedPixelCount = 0;
-      for (let i = 0; i < SQ * SQ; i++) {
-        const brightness = (sqMask[i * 4] + sqMask[i * 4 + 1] + sqMask[i * 4 + 2]) / 3;
-        if (brightness < 128) {
-          sqPixels[i * 4] = 0; sqPixels[i * 4 + 1] = 0; sqPixels[i * 4 + 2] = 0; sqPixels[i * 4 + 3] = 0;
-          sqMask[i * 4] = 0; sqMask[i * 4 + 1] = 0; sqMask[i * 4 + 2] = 0; sqMask[i * 4 + 3] = 0;
-          maskedPixelCount++;
-        } else {
-          sqMask[i * 4] = 255; sqMask[i * 4 + 1] = 255; sqMask[i * 4 + 2] = 255; sqMask[i * 4 + 3] = 255;
-        }
-      }
-
-      console.log('[removal-preview] OpenAI fallback — masked pixels:', maskedPixelCount);
-      const imageBuffer = await sharp(Buffer.from(sqPixels.buffer), { raw: { width: SQ, height: SQ, channels: 4 } }).png().toBuffer();
-      const maskBuffer = await sharp(Buffer.from(sqMask.buffer), { raw: { width: SQ, height: SQ, channels: 4 } }).png().toBuffer();
-
-      const { toFile } = await import('openai');
-      const imageFile = await toFile(imageBuffer, 'photo.png', { type: 'image/png' });
-      const maskFile = await toFile(maskBuffer, 'mask.png', { type: 'image/png' });
-
-      const editResponse = await openaiClient.images.edit({
-        model: 'gpt-image-1',
-        image: imageFile,
-        mask: maskFile,
-        prompt: 'Fill ONLY the transparent masked area with what would realistically be behind the removed plant. Seamlessly continue the exact surrounding materials — brick mortar pattern, vinyl siding lap lines, stucco texture, concrete, mulch, soil, or grass. Match the exact color temperature, shadow direction, surface weathering, and grain of adjacent surfaces. Preserve every pixel outside the masked region identically. Shot on Canon EOS R5, 35mm lens, f/8, natural daylight, RAW photograph.',
-        n: 1,
-        size: '1024x1024',
-        quality: 'high',
-      });
-
-      const resultData = editResponse.data[0];
-      if (resultData.b64_json) {
-        resultBuffer = Buffer.from(resultData.b64_json, 'base64');
-      } else if (resultData.url) {
-        const dlRes = await fetch(resultData.url);
-        resultBuffer = Buffer.from(await dlRes.arrayBuffer());
-      } else {
-        throw new Error('gpt-image-1 returned no image data');
-      }
-    }
-
-    if (!resultBuffer) throw new Error('No AI image provider available');
+    const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
+    console.log('[removal-preview] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
     const finalBuffer = await sharp(resultBuffer)
       .resize(origW, origH, { fit: 'fill' })
@@ -1418,19 +1347,16 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
     res.json({ previewUrl: resultDataUrl });
   } catch (err) {
     console.error('[removal-preview] Error:', err.message);
-    if (err.response) {
-      console.error('[removal-preview] API response:', err.response.status, err.response.data);
-    }
     res.status(500).json({ error: `Removal preview failed: ${err.message}` });
   }
 });
 
-// ─── Design Render (Gemini primary, gpt-image-1 fallback — new plants inpainted onto property photo) ──
+// ─── Design Render (Gemini — new plants inpainted onto property photo) ──
 app.post('/api/design-render', authenticate, async (req, res) => {
   try {
-    const { photoUrl, designPlants, keptPlants, removedPlants, designStyle, narrative, maskDataUrl } = req.body;
+    const { photoUrl, designPlants, designStyle, maskDataUrl } = req.body;
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
-    if (!googleAI && !openaiClient) return res.status(500).json({ error: 'No AI image provider configured' });
+    if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
 
     // SSRF protection — only allow Supabase Storage URLs or data URLs
     if (!photoUrl.startsWith('data:')) {
@@ -1477,136 +1403,44 @@ app.post('/api/design-render', authenticate, async (req, res) => {
 
     const designPrompt = `Professional landscape installation photograph. In the landscape bed areas of this residential property, install these plants: ${plantDesc}. Style: ${designStyle || 'naturalistic'}. Fresh aged hardwood mulch (dark brown, natural texture) fills all bed space between plants with clean steel edging borders. Each plant is at realistic mature size with natural leaf detail and shadow casting. Preserve the house, driveway, lawn, sky, and all existing features exactly as they are. Shot on Canon EOS R5, 35mm lens, f/8, golden hour natural light.`;
 
-    let resultBuffer;
+    console.log('[design-render] Calling Gemini gemini-2.0-flash-preview-image-generation...');
+    const resizedBuffer = await sharp(photoBuffer)
+      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
 
-    // Try Gemini first (faster, cheaper)
-    if (googleAI) {
-      console.log('[design-render] Calling Gemini gemini-2.0-flash-preview-image-generation...');
-      try {
-        // Resize to reasonable size for Gemini
-        const resizedBuffer = await sharp(photoBuffer)
-          .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
-          .jpeg({ quality: 85 })
-          .toBuffer();
-        const imageBase64 = resizedBuffer.toString('base64');
-
-        const response = await googleAI.models.generateContent({
-          model: 'gemini-2.0-flash-preview-image-generation',
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                { inlineData: { mimeType: 'image/jpeg', data: imageBase64 } },
-                { text: designPrompt },
-              ],
-            },
+    const response = await googleAI.models.generateContent({
+      model: 'gemini-2.0-flash-preview-image-generation',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
+            { text: designPrompt },
           ],
-          config: {
-            responseModalities: ['image', 'text'],
-          },
-        });
+        },
+      ],
+      config: {
+        responseModalities: ['image', 'text'],
+      },
+    });
 
-        // Extract generated image from response
-        const parts = response.candidates?.[0]?.content?.parts || [];
-        const imagePart = parts.find(p => p.inlineData);
-        if (imagePart?.inlineData?.data) {
-          resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
-          console.log('[design-render] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
-        } else {
-          const textPart = parts.find(p => p.text);
-          console.warn('[design-render] Gemini returned no image. Text:', textPart?.text?.substring(0, 200));
-          throw new Error('Gemini returned no image data');
-        }
-      } catch (geminiErr) {
-        console.warn('[design-render] Gemini failed:', geminiErr.message, '— falling back to gpt-image-1');
-        resultBuffer = null; // Fall through to OpenAI
-      }
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    const imagePart = parts.find(p => p.inlineData);
+    if (!imagePart?.inlineData?.data) {
+      const textPart = parts.find(p => p.text);
+      throw new Error(textPart?.text || 'Gemini returned no image data');
     }
 
-    // Fallback to gpt-image-1 if Gemini failed or unavailable
-    if (!resultBuffer && openaiClient) {
-      console.log('[design-render] Falling back to gpt-image-1 images.edit...');
-      const SQ = 1024;
-      const { data: sqPixels } = await sharp(photoBuffer)
-        .resize(SQ, SQ, { fit: 'fill' })
-        .ensureAlpha()
-        .raw()
-        .toBuffer({ resolveWithObject: true });
+    const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
+    console.log('[design-render] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
-      const maskPixels = Buffer.alloc(SQ * SQ * 4);
-      let maskedCount = 0;
-
-      if (maskDataUrl) {
-        const b64 = maskDataUrl.replace(/^data:image\/png;base64,/, '');
-        const rawMask = Buffer.from(b64, 'base64');
-        const { data: drawnMask } = await sharp(rawMask)
-          .resize(SQ, SQ, { fit: 'fill' }).ensureAlpha().raw()
-          .toBuffer({ resolveWithObject: true });
-        for (let i = 0; i < SQ * SQ; i++) {
-          const brightness = (drawnMask[i * 4] + drawnMask[i * 4 + 1] + drawnMask[i * 4 + 2]) / 3;
-          if (brightness < 128) {
-            sqPixels[i * 4] = 0; sqPixels[i * 4 + 1] = 0; sqPixels[i * 4 + 2] = 0; sqPixels[i * 4 + 3] = 0;
-            maskPixels[i * 4 + 3] = 0;
-            maskedCount++;
-          } else {
-            maskPixels[i * 4] = 255; maskPixels[i * 4 + 1] = 255; maskPixels[i * 4 + 2] = 255; maskPixels[i * 4 + 3] = 255;
-          }
-        }
-      } else {
-        const editStartY = Math.round(SQ * 0.65);
-        for (let y = 0; y < SQ; y++) {
-          for (let x = 0; x < SQ; x++) {
-            const i = y * SQ + x;
-            if (y >= editStartY) {
-              sqPixels[i * 4] = 0; sqPixels[i * 4 + 1] = 0; sqPixels[i * 4 + 2] = 0; sqPixels[i * 4 + 3] = 0;
-              maskPixels[i * 4 + 3] = 0;
-              maskedCount++;
-            } else {
-              maskPixels[i * 4] = 255; maskPixels[i * 4 + 1] = 255; maskPixels[i * 4 + 2] = 255; maskPixels[i * 4 + 3] = 255;
-            }
-          }
-        }
-      }
-
-      console.log('[design-render] OpenAI fallback — masked pixels:', maskedCount);
-      const imageBuffer = await sharp(Buffer.from(sqPixels.buffer), { raw: { width: SQ, height: SQ, channels: 4 } }).png().toBuffer();
-      const maskBuffer = await sharp(Buffer.from(maskPixels.buffer), { raw: { width: SQ, height: SQ, channels: 4 } }).png().toBuffer();
-
-      const { toFile } = await import('openai');
-      const imageFile = await toFile(imageBuffer, 'photo.png', { type: 'image/png' });
-      const maskFile = await toFile(maskBuffer, 'mask.png', { type: 'image/png' });
-
-      const editResponse = await openaiClient.images.edit({
-        model: 'gpt-image-1',
-        image: imageFile,
-        mask: maskFile,
-        prompt: designPrompt,
-        n: 1,
-        size: '1024x1024',
-        quality: 'high',
-      });
-
-      const resultData = editResponse.data[0];
-      if (resultData.b64_json) {
-        resultBuffer = Buffer.from(resultData.b64_json, 'base64');
-      } else if (resultData.url) {
-        const dlRes = await fetch(resultData.url);
-        resultBuffer = Buffer.from(await dlRes.arrayBuffer());
-      } else {
-        throw new Error('gpt-image-1 returned no image data');
-      }
-    }
-
-    if (!resultBuffer) throw new Error('No AI image provider available');
-
-    // Resize back to original aspect ratio
     const finalBuffer = await sharp(resultBuffer)
       .resize(origW, origH, { fit: 'fill' })
       .jpeg({ quality: 92 })
       .toBuffer();
 
     const renderDataUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
-
     console.log('[design-render] Final design complete:', Math.round(finalBuffer.length / 1024), 'KB');
     res.json({ renderUrl: renderDataUrl, prompt: plantDesc });
   } catch (err) {
