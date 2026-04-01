@@ -1477,7 +1477,7 @@ This must look like a real photograph taken after a professional landscape insta
 // DESIGN ADJUST — pin-based localized edits via Gemini
 // ═══════════════════════════════════════════════════════════════════
 
-app.post('/api/design-adjust', authenticate, aiRateLimit, async (req, res) => {
+app.post('/api/design-adjust', authenticate, async (req, res) => {
   try {
     const { renderDataUrl, pinX, pinY, radius, prompt } = req.body;
     if (!renderDataUrl) return res.status(400).json({ error: 'renderDataUrl is required' });
