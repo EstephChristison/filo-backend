@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════
 // FILO — AI Pipeline Module
-// Real OpenAI GPT-4o + DALL-E 3 + Replicate SDXL Integration
+// Real OpenAI GPT-4o + gpt-image-1 + Replicate SDXL Integration
 // Drop-in replacement for callManusAI() placeholder
 // ═══════════════════════════════════════════════════════════════════
 
@@ -434,7 +434,9 @@ Create a complete plant placement plan using ONLY plants from the available inve
   }
 
   async generateWithDalle(prompt) {
-    // NOTE: Stack spec requires gpt-image-1 via images.generate (not DALL-E 3)
+    // Uses gpt-image-1 via images.generate for text-to-image landscape rendering.
+    // Note: images.edit (inpainting) is used by /removal-preview and /design-render routes
+    // in filo-api-server.js for photo-based editing with masks.
     const response = await openai.images.generate({
       model: 'gpt-image-1',
       prompt,

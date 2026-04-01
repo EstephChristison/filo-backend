@@ -17,7 +17,6 @@ import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import pg from 'pg';
-import AWS from 'aws-sdk';
 import Stripe from 'stripe';
 import sharp from 'sharp';
 
@@ -42,12 +41,6 @@ const config = {
     basePriceId: process.env.STRIPE_BASE_PRICE_ID,
     userPriceId: process.env.STRIPE_USER_PRICE_ID,
   },
-  aws: {
-    region: process.env.AWS_REGION || 'us-east-1',
-    s3Bucket: process.env.S3_BUCKET || 'filo-uploads',
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  },
   supabaseStorage: {
     url: process.env.SUPABASE_URL || 'https://yxgwtrbbczgffrzmjahe.supabase.co',
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -63,11 +56,6 @@ const config = {
 
 const pool = new pg.Pool(config.database);
 const stripe = config.stripe.secretKey ? new Stripe(config.stripe.secretKey) : null;
-const s3 = config.aws.accessKeyId ? new AWS.S3({
-  region: config.aws.region,
-  accessKeyId: config.aws.accessKeyId,
-  secretAccessKey: config.aws.secretAccessKey,
-}) : null;
 
 // ─── Supabase Storage Helper ────────────────────────────────────
 // Uses Supabase Storage REST API directly (no extra dependency)
@@ -161,6 +149,17 @@ const upload = multer({
 function stripHtml(value) {
   if (typeof value !== 'string') return value;
   return value.replace(/<[^>]*>/g, '').trim();
+}
+
+// Sanitize a filename for use in storage key paths — strips path traversal sequences
+// and characters that could escape the intended directory prefix.
+function sanitizeFilename(name) {
+  if (typeof name !== 'string') return 'upload';
+  return name
+    .replace(/\.\.[/\\]/g, '')   // strip ../ and ..\
+    .replace(/[/\\]/g, '_')      // replace remaining slashes
+    .replace(/[^a-zA-Z0-9._\-]/g, '_') // allow only safe chars
+    .substring(0, 200) || 'upload';
 }
 
 // ─── Database Helper ─────────────────────────────────────────────
@@ -420,6 +419,8 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     );
 
     const tokenHash = await bcrypt.hash(refreshToken, 10);
+    // Clean up expired/revoked tokens before inserting new one (prevents unbounded growth)
+    await db.query('DELETE FROM refresh_tokens WHERE user_id = $1 AND (expires_at < NOW() OR revoked = true)', [user.id]);
     await db.query(
       `INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, NOW() + INTERVAL '7 days')`,
       [user.id, tokenHash]
@@ -642,7 +643,15 @@ app.get('/api/clients', authenticate, requireActiveSubscription, async (req, res
     params.push(limit, offset);
 
     const clients = await db.getMany(query, params);
-    const countResult = await db.getOne('SELECT COUNT(*) FROM clients WHERE company_id = $1', [req.user.companyId]);
+
+    // Count query must mirror the same search filter to produce accurate pagination totals
+    let countQuery = 'SELECT COUNT(*) FROM clients WHERE company_id = $1';
+    const countParams = [req.user.companyId];
+    if (search) {
+      countQuery += ` AND (display_name ILIKE $2 OR email ILIKE $2 OR phone ILIKE $2)`;
+      countParams.push(`%${search}%`);
+    }
+    const countResult = await db.getOne(countQuery, countParams);
 
     res.json({ clients, total: parseInt(countResult.count), page: parseInt(page), limit: parseInt(limit) });
   } catch (err) {
@@ -1385,25 +1394,21 @@ app.post('/api/upload', authenticate, upload.single('file'), async (req, res) =>
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file received. Use multipart/form-data with field name "file".' });
     if (!fileType) return res.status(400).json({ error: 'fileType is required (photo, logo, document, etc.)' });
-    const key = `${req.user.companyId}/${fileType}/${uuidv4()}-${file.originalname}`;
+    const key = `${req.user.companyId}/${fileType}/${uuidv4()}-${sanitizeFilename(file.originalname)}`;
     let cdnUrl;
 
     if (supaStorage) {
       // Upload to Supabase Storage
       await supaStorage.upload(key, file.buffer, file.mimetype);
       cdnUrl = supaStorage.getPublicUrl(key);
-    } else if (s3) {
-      // Fallback to S3
-      await s3.upload({ Bucket: config.aws.s3Bucket, Key: key, Body: file.buffer, ContentType: file.mimetype, ACL: 'private' }).promise();
-      cdnUrl = `https://${config.aws.s3Bucket}.s3.${config.aws.region}.amazonaws.com/${key}`;
     } else {
-      return res.status(503).json({ error: 'No storage service configured. Set SUPABASE_SERVICE_ROLE_KEY or AWS credentials.' });
+      return res.status(503).json({ error: 'No storage service configured. Set SUPABASE_SERVICE_ROLE_KEY.' });
     }
 
     const dbFile = await db.getOne(
       `INSERT INTO files (company_id, uploaded_by, file_type, original_name, s3_key, s3_bucket, cdn_url, mime_type, file_size)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.user.companyId, req.user.userId, fileType, file.originalname, key, supaStorage ? 'supabase' : config.aws.s3Bucket, cdnUrl, file.mimetype, file.size]
+      [req.user.companyId, req.user.userId, fileType, file.originalname, key, 'supabase', cdnUrl, file.mimetype, file.size]
     );
 
     res.status(201).json(dbFile);
@@ -1415,8 +1420,8 @@ app.post('/api/upload', authenticate, upload.single('file'), async (req, res) =>
 
 app.post('/api/upload/photos/:areaId', authenticate, upload.array('photos', 20), async (req, res) => {
   try {
-    if (!supaStorage && !s3) {
-      return res.status(503).json({ error: 'No storage service configured. Set SUPABASE_SERVICE_ROLE_KEY or AWS credentials.' });
+    if (!supaStorage) {
+      return res.status(503).json({ error: 'No storage service configured. Set SUPABASE_SERVICE_ROLE_KEY.' });
     }
 
     if (!req.files || req.files.length === 0) {
@@ -1436,21 +1441,16 @@ app.post('/api/upload/photos/:areaId', authenticate, upload.array('photos', 20),
 
     const photos = [];
     for (const file of req.files) {
-      const key = `${req.user.companyId}/photos/${uuidv4()}-${file.originalname}`;
+      const key = `${req.user.companyId}/photos/${uuidv4()}-${sanitizeFilename(file.originalname)}`;
       let cdnUrl;
 
-      if (supaStorage) {
-        await supaStorage.upload(key, file.buffer, file.mimetype);
-        cdnUrl = supaStorage.getPublicUrl(key);
-      } else {
-        await s3.upload({ Bucket: config.aws.s3Bucket, Key: key, Body: file.buffer, ContentType: file.mimetype }).promise();
-        cdnUrl = `https://${config.aws.s3Bucket}.s3.${config.aws.region}.amazonaws.com/${key}`;
-      }
+      await supaStorage.upload(key, file.buffer, file.mimetype);
+      cdnUrl = supaStorage.getPublicUrl(key);
 
       const dbFile = await db.getOne(
         `INSERT INTO files (company_id, uploaded_by, file_type, original_name, s3_key, s3_bucket, cdn_url, mime_type, file_size)
          VALUES ($1, $2, 'photo', $3, $4, $5, $6, $7, $8) RETURNING *`,
-        [req.user.companyId, req.user.userId, file.originalname, key, supaStorage ? 'supabase' : config.aws.s3Bucket, cdnUrl, file.mimetype, file.size]
+        [req.user.companyId, req.user.userId, file.originalname, key, 'supabase', cdnUrl, file.mimetype, file.size]
       );
 
       const photo = await db.getOne(
@@ -1540,13 +1540,8 @@ app.post('/api/upload/presign', authenticate, async (req, res) => {
     if (supaStorage) {
       const signedUrl = await supaStorage.createSignedUploadUrl(key);
       res.json({ presignedUrl: signedUrl, key, cdnUrl: supaStorage.getPublicUrl(key) });
-    } else if (s3) {
-      const presignedUrl = s3.getSignedUrl('putObject', {
-        Bucket: config.aws.s3Bucket, Key: key, ContentType: contentType, Expires: 300,
-      });
-      res.json({ presignedUrl, key, cdnUrl: `https://${config.aws.s3Bucket}.s3.${config.aws.region}.amazonaws.com/${key}` });
     } else {
-      res.status(503).json({ error: 'No storage service configured.' });
+      res.status(503).json({ error: 'No storage service configured. Set SUPABASE_SERVICE_ROLE_KEY.' });
     }
   } catch (err) {
     console.error('Presign error:', err);
@@ -3359,7 +3354,7 @@ app.get('/api/health', async (req, res) => {
   }
   health.services.openai = openaiClient ? 'configured' : 'not configured';
   health.services.stripe = stripe ? 'configured' : 'not configured';
-  health.services.storage = supaStorage ? 'supabase' : (s3 ? 's3' : 'not configured');
+  health.services.storage = supaStorage ? 'supabase' : 'not configured';
   res.json(health);
 });
 
@@ -3413,7 +3408,7 @@ process.on('unhandledRejection', (reason, promise) => {
 app.listen(config.port, async () => {
   console.log(`🌿 FILO API server running on port ${config.port}`);
   console.log(`   Environment: ${config.nodeEnv}`);
-  console.log(`   Storage: ${supaStorage ? 'Supabase Storage' : (s3 ? 'AWS S3' : '⚠️  NONE — set SUPABASE_SERVICE_ROLE_KEY')}`);
+  console.log(`   Storage: ${supaStorage ? 'Supabase Storage' : '⚠️  NONE — set SUPABASE_SERVICE_ROLE_KEY'}`);
 
   // Ensure Supabase Storage bucket exists on startup
   if (supaStorage) {
