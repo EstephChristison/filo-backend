@@ -26,8 +26,8 @@ import sharp from 'sharp';
 const config = {
   port: process.env.PORT || 4000,
   nodeEnv: process.env.NODE_ENV || 'development',
-  jwtSecret: process.env.JWT_SECRET || 'filo-dev-secret-change-in-production',
-  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || 'filo-refresh-secret-change',
+  jwtSecret: process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' ? null : 'filo-dev-secret-local-only'),
+  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || (process.env.NODE_ENV === 'production' ? null : 'filo-refresh-secret-local-only'),
   jwtExpiry: '2h',
   jwtRefreshExpiry: '7d',
   database: {
@@ -154,6 +154,14 @@ const upload = multer({
     cb(null, allowed.includes(file.mimetype));
   },
 });
+
+// ─── Input Sanitization ──────────────────────────────────────────
+// Strips HTML tags from string inputs to prevent stored XSS.
+// Applied at all user-facing string boundaries.
+function stripHtml(value) {
+  if (typeof value !== 'string') return value;
+  return value.replace(/<[^>]*>/g, '').trim();
+}
 
 // ─── Database Helper ─────────────────────────────────────────────
 
@@ -307,7 +315,13 @@ async function logActivity(companyId, userId, entityType, entityId, action, desc
 // ─── Register Company ────────────────────────────────────────────
 app.post('/api/auth/register', authLimiter, async (req, res) => {
   try {
-    const { companyName, email, password, firstName, lastName, phone } = req.body;
+    const rawBody = req.body;
+    const companyName = stripHtml(rawBody.companyName);
+    const email = (rawBody.email || '').trim().toLowerCase();
+    const password = rawBody.password || '';
+    const firstName = stripHtml(rawBody.firstName);
+    const lastName = stripHtml(rawBody.lastName);
+    const phone = stripHtml(rawBody.phone);
 
     if (!companyName || !email || !password || !firstName || !lastName) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -472,7 +486,10 @@ app.post('/api/auth/logout', authenticate, async (req, res) => {
 // ─── Invite User ─────────────────────────────────────────────────
 app.post('/api/auth/invite', authenticate, requireAdmin, async (req, res) => {
   try {
-    const { email, firstName, lastName, role } = req.body;
+    const email = (req.body.email || '').trim().toLowerCase();
+    const firstName = stripHtml(req.body.firstName);
+    const lastName = stripHtml(req.body.lastName);
+    const role = req.body.role;
     if (!email || !firstName || !lastName) return res.status(400).json({ error: 'email, firstName, and lastName are required' });
     const inviteToken = uuidv4();
     const tempPassword = await bcrypt.hash(uuidv4(), 12);
@@ -638,16 +655,16 @@ app.post('/api/clients', authenticate, requireActiveSubscription, async (req, re
   try {
     const b = req.body;
     // Accept both frontend shorthand (name/address) and full field names
-    const displayName = b.displayName || b.name || 'Unnamed Client';
-    const firstName = b.firstName || (b.name ? b.name.split(' ')[0] : null);
-    const lastName = b.lastName || (b.name && b.name.split(' ').length > 1 ? b.name.split(' ').slice(1).join(' ') : null);
-    const email = b.email || null;
+    const displayName = stripHtml(b.displayName || b.name || 'Unnamed Client');
+    const firstName = stripHtml(b.firstName || (b.name ? b.name.split(' ')[0] : null));
+    const lastName = stripHtml(b.lastName || (b.name && b.name.split(' ').length > 1 ? b.name.split(' ').slice(1).join(' ') : null));
+    const email = b.email ? b.email.trim().toLowerCase() : null;
     const phone = b.phone || null;
-    const addressLine1 = b.addressLine1 || b.address || null;
-    const city = b.city || null;
-    const state = b.state || null;
+    const addressLine1 = stripHtml(b.addressLine1 || b.address || null);
+    const city = stripHtml(b.city || null);
+    const state = stripHtml(b.state || null);
     const zip = b.zip || null;
-    const notes = b.notes || null;
+    const notes = stripHtml(b.notes || null);
 
     const client = await db.getOne(
       `INSERT INTO clients (company_id, display_name, first_name, last_name, email, phone, address_line1, city, state, zip, notes)
@@ -2577,6 +2594,9 @@ app.get('/api/projects/:projectId/submittals', authenticate, async (req, res) =>
 
 app.get('/api/projects/:projectId/revisions', authenticate, async (req, res) => {
   try {
+    // Verify project belongs to this company before returning revisions (IDOR fix)
+    const project = await db.getOne('SELECT id FROM projects WHERE id = $1 AND company_id = $2', [req.params.projectId, req.user.companyId]);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
     const revisions = await db.getMany(
       `SELECT r.*, u.first_name, u.last_name FROM revisions r
        JOIN users u ON u.id = r.user_id
@@ -3366,17 +3386,18 @@ app.use((err, req, res, next) => {
 
 // ─── Startup Environment Checks ──────────────────────────────────
 
-const REQUIRED_ENV = ['JWT_SECRET', 'DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'OPENAI_API_KEY'];
+const REQUIRED_ENV = ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'DATABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'OPENAI_API_KEY', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET'];
 const MISSING_ENV = REQUIRED_ENV.filter(k => !process.env[k]);
 if (MISSING_ENV.length > 0) {
   console.warn(`⚠️  Missing environment variables: ${MISSING_ENV.join(', ')}`);
   if (config.nodeEnv === 'production') {
     console.error('FATAL: Required environment variables missing in production. Set them in Railway dashboard.');
-    // Don't crash — Railway will show logs — but flag prominently
+    process.exit(1);
   }
 }
-if (!process.env.JWT_SECRET) {
-  console.warn('⚠️  JWT_SECRET not set — using insecure fallback. Set JWT_SECRET in Railway dashboard immediately!');
+if (!config.jwtSecret || !config.jwtRefreshSecret) {
+  console.error('FATAL: JWT_SECRET and JWT_REFRESH_SECRET must be set. Server cannot start safely.');
+  process.exit(1);
 }
 
 // ─── Global Unhandled Rejection Safety Net ───────────────────────
