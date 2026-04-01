@@ -1373,9 +1373,10 @@ app.post('/api/design-render', authenticate, async (req, res) => {
       }
     }
 
-    console.log('[design-render] Downloading original photo...');
+    const isRemovalPreview = photoUrl.startsWith('data:');
+    console.log('[design-render] Photo source: %s (%s)', isRemovalPreview ? 'REMOVAL PREVIEW (data URL)' : 'ORIGINAL PHOTO (URL)', isRemovalPreview ? Math.round(photoUrl.length / 1024) + 'KB base64' : photoUrl.substring(0, 80));
     let photoBuffer;
-    if (photoUrl.startsWith('data:')) {
+    if (isRemovalPreview) {
       const b64 = photoUrl.replace(/^data:image\/[^;]+;base64,/, '');
       photoBuffer = Buffer.from(b64, 'base64');
     } else {
@@ -1418,7 +1419,8 @@ app.post('/api/design-render', authenticate, async (req, res) => {
       : '';
 
     const designPrompt = `RULE #0 — EXISTING PLANT MATERIAL (HIGHEST PRIORITY):
-Leave ALL existing plant material in this photo EXACTLY as-is. Do NOT change, alter, update, move, resize, reshape, recolor, or remove ANY existing plants, trees, or shrubs that are already visible in this image. They must remain pixel-for-pixel identical to the input photo. You are ONLY adding NEW plants into the empty/bare areas around the existing plants.
+${isRemovalPreview ? `IMPORTANT CONTEXT: This photo has ALREADY been through bed preparation — unwanted plants have ALREADY been removed. The bare mulch areas are INTENTIONALLY EMPTY. Do NOT add back or recreate any large plants, shrubs, or vines that may have previously existed in those bare areas. Those plants were removed ON PURPOSE by the client. The only things to add are the small, specific NEW plants listed below.
+` : ''}Leave ALL existing plant material in this photo EXACTLY as-is. Do NOT change, alter, update, move, resize, reshape, recolor, or remove ANY existing plants, trees, or shrubs that are already visible in this image. They must remain pixel-for-pixel identical to the input photo. You are ONLY adding NEW plants into the empty/bare areas around the existing plants.
 ${keptPlantsDesc ? `\nExisting plants to preserve:\n${keptPlantsDesc}\n` : ''}
 RULE #1 — DO NOT ALTER THE HOUSE.
 Every architectural detail — windows, doors, brick pattern, siding, roofline, gutters, trim — must remain pixel-perfect identical to the input photo. Zero modifications to any structure.
@@ -1439,6 +1441,7 @@ SIZE AND SHAPE RULES FOR NEW PLANTS:
 - SCALE: Back row shrubs should reach NO HIGHER than the bottom of the windows — roughly 3-4ft tall. They must NOT cover, overlap, or touch any window.
 - All new shrubs must be COMPACT, ROUNDED, and INDIVIDUALLY DISTINCT — like neatly pruned nursery stock fresh from a garden center. Mulch visible between them.
 - NO sprawling, NO climbing, NO vine-like growth, NO plants taller than 5ft. These are NEWLY PLANTED, not mature overgrown specimens.
+- ABSOLUTELY NO large plants covering or climbing the brick wall. The brick wall must remain fully visible above the new plants. NO plant should cover more than 3ft of wall height.
 - Front row: low, dense border along the bed edge, never taller than 18 inches.
 - If only one species is listed, fill the empty areas with that species at appropriate spacing.
 
