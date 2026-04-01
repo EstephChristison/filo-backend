@@ -1309,7 +1309,7 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
       .toBuffer();
 
     const response = await googleAI.models.generateContent({
-      model: 'gemini-2.0-flash-preview-image-generation',
+      model: 'gemini-2.5-flash-image',
       contents: [
         {
           role: 'user',
@@ -1403,14 +1403,14 @@ app.post('/api/design-render', authenticate, async (req, res) => {
 
     const designPrompt = `Professional landscape installation photograph. In the landscape bed areas of this residential property, install these plants: ${plantDesc}. Style: ${designStyle || 'naturalistic'}. Fresh aged hardwood mulch (dark brown, natural texture) fills all bed space between plants with clean steel edging borders. Each plant is at realistic mature size with natural leaf detail and shadow casting. Preserve the house, driveway, lawn, sky, and all existing features exactly as they are. Shot on Canon EOS R5, 35mm lens, f/8, golden hour natural light.`;
 
-    console.log('[design-render] Calling Gemini gemini-2.0-flash-preview-image-generation...');
+    console.log('[design-render] Calling Gemini gemini-2.5-flash-image...');
     const resizedBuffer = await sharp(photoBuffer)
       .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 85 })
       .toBuffer();
 
     const response = await googleAI.models.generateContent({
-      model: 'gemini-2.0-flash-preview-image-generation',
+      model: 'gemini-2.5-flash-image',
       contents: [
         {
           role: 'user',
