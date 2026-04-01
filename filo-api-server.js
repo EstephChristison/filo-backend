@@ -20,6 +20,7 @@ import pg from 'pg';
 import Stripe from 'stripe';
 import sharp from 'sharp';
 import OpenAI from 'openai';
+import { GoogleGenAI } from '@google/genai';
 import { createAIHandler } from './filo-ai-pipeline.js';
 
 // ─── Configuration ───────────────────────────────────────────────
@@ -1239,10 +1240,10 @@ app.put('/api/existing-plants/:id/mark', authenticate, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// ─── Removal Preview (gpt-image-1 inpainting — removes plants from photo) ─
+// ─── Removal Preview (Gemini primary, gpt-image-1 fallback — removes plants from photo) ─
 app.post('/api/removal-preview', authenticate, async (req, res) => {
   try {
-    if (!openaiClient) return res.status(503).json({ error: 'AI service not configured' });
+    if (!googleAI && !openaiClient) return res.status(503).json({ error: 'AI service not configured' });
     const { photoUrl, maskDataUrl } = req.body;
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
     if (!maskDataUrl) return res.status(400).json({ error: 'Draw on the photo first to mark areas for removal' });
@@ -1263,122 +1264,136 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
     }
 
     console.log('[removal-preview] Downloading original photo...');
-    const photoResponse = await fetch(photoUrl);
-    if (!photoResponse.ok) throw new Error(`Failed to download photo: ${photoResponse.status}`);
-    const photoBuffer = Buffer.from(await photoResponse.arrayBuffer());
+    let photoBuffer;
+    if (photoUrl.startsWith('data:')) {
+      const b64 = photoUrl.replace(/^data:image\/[^;]+;base64,/, '');
+      photoBuffer = Buffer.from(b64, 'base64');
+    } else {
+      const photoResponse = await fetch(photoUrl);
+      if (!photoResponse.ok) throw new Error(`Failed to download photo: ${photoResponse.status}`);
+      photoBuffer = Buffer.from(await photoResponse.arrayBuffer());
+    }
 
-    // Get original dimensions, work at 1024x1024 (required by images.edit)
     const metadata = await sharp(photoBuffer).metadata();
     const origW = metadata.width;
     const origH = metadata.height;
-    const SQ = 1024;
 
-    console.log('[removal-preview] Original:', origW, 'x', origH, '→ processing at', SQ, 'x', SQ);
+    const removalPrompt = 'Remove the marked/highlighted plants from this landscape photo. Fill the areas where plants were removed with what would realistically be behind them — continue the surrounding materials like brick, siding, mulch, soil, or grass seamlessly. Match the exact color temperature, shadow direction, and surface texture. Preserve everything else in the photo exactly as it is.';
 
-    // ── Step 1: Prepare the IMAGE (1024x1024 RGBA PNG) ──
-    // Resize photo to square, make the drawn/masked areas TRANSPARENT
-    // so gpt-image-1 knows exactly what to regenerate
-    const { data: sqPixels } = await sharp(photoBuffer)
-      .resize(SQ, SQ, { fit: 'fill' }) // stretch to square (preserves all content)
-      .ensureAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    let resultBuffer;
 
-    // ── Step 2: Prepare the MASK (1024x1024) ──
-    const base64Data = maskDataUrl.replace(/^data:image\/png;base64,/, '');
-    const rawMask = Buffer.from(base64Data, 'base64');
-    const { data: sqMask } = await sharp(rawMask)
-      .resize(SQ, SQ, { fit: 'fill' })
-      .ensureAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    // Try Gemini first
+    if (googleAI) {
+      console.log('[removal-preview] Calling Gemini for plant removal...');
+      try {
+        const resizedBuffer = await sharp(photoBuffer)
+          .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 85 })
+          .toBuffer();
 
-    // ── Step 3: Erase masked areas from IMAGE + build proper MASK ──
-    // For gpt-image-1 images.edit:
-    //   IMAGE: transparent pixels = areas to regenerate
-    //   MASK:  transparent pixels = areas to regenerate (same regions)
-    let maskedPixelCount = 0;
-    for (let i = 0; i < SQ * SQ; i++) {
-      const brightness = (sqMask[i * 4] + sqMask[i * 4 + 1] + sqMask[i * 4 + 2]) / 3;
-      if (brightness < 128) {
-        // This pixel is in the drawn area — erase it from the image
-        sqPixels[i * 4 + 0] = 0;
-        sqPixels[i * 4 + 1] = 0;
-        sqPixels[i * 4 + 2] = 0;
-        sqPixels[i * 4 + 3] = 0; // fully transparent
-        // Mask: transparent = regenerate
-        sqMask[i * 4 + 0] = 0;
-        sqMask[i * 4 + 1] = 0;
-        sqMask[i * 4 + 2] = 0;
-        sqMask[i * 4 + 3] = 0; // transparent = edit zone
-        maskedPixelCount++;
-      } else {
-        // Keep area — make mask fully opaque white
-        sqMask[i * 4 + 0] = 255;
-        sqMask[i * 4 + 1] = 255;
-        sqMask[i * 4 + 2] = 255;
-        sqMask[i * 4 + 3] = 255; // opaque = preserve
+        // Also send the mask as a second image for context
+        const maskB64 = maskDataUrl.replace(/^data:image\/png;base64,/, '');
+        const maskResized = await sharp(Buffer.from(maskB64, 'base64'))
+          .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 85 })
+          .toBuffer();
+
+        const response = await googleAI.models.generateContent({
+          model: 'gemini-2.0-flash-preview-image-generation',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { text: 'Here is the original property photo:' },
+                { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
+                { text: 'Here is a mask showing the areas to edit (dark/black areas are the plants to remove):' },
+                { inlineData: { mimeType: 'image/jpeg', data: maskResized.toString('base64') } },
+                { text: removalPrompt },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['image', 'text'],
+          },
+        });
+
+        const parts = response.candidates?.[0]?.content?.parts || [];
+        const imagePart = parts.find(p => p.inlineData);
+        if (imagePart?.inlineData?.data) {
+          resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
+          console.log('[removal-preview] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
+        } else {
+          throw new Error('Gemini returned no image data');
+        }
+      } catch (geminiErr) {
+        console.warn('[removal-preview] Gemini failed:', geminiErr.message, '— falling back to gpt-image-1');
+        resultBuffer = null;
       }
     }
 
-    console.log('[removal-preview] Masked pixels:', maskedPixelCount, 'of', SQ * SQ,
-      '(' + Math.round(maskedPixelCount / (SQ * SQ) * 100) + '%)');
+    // Fallback to gpt-image-1
+    if (!resultBuffer && openaiClient) {
+      console.log('[removal-preview] Falling back to gpt-image-1...');
+      const SQ = 1024;
+      const { data: sqPixels } = await sharp(photoBuffer)
+        .resize(SQ, SQ, { fit: 'fill' }).ensureAlpha().raw()
+        .toBuffer({ resolveWithObject: true });
 
-    // Convert to PNG buffers
-    const imageBuffer = await sharp(Buffer.from(sqPixels.buffer), {
-      raw: { width: SQ, height: SQ, channels: 4 }
-    }).png().toBuffer();
+      const base64Data = maskDataUrl.replace(/^data:image\/png;base64,/, '');
+      const rawMask = Buffer.from(base64Data, 'base64');
+      const { data: sqMask } = await sharp(rawMask)
+        .resize(SQ, SQ, { fit: 'fill' }).ensureAlpha().raw()
+        .toBuffer({ resolveWithObject: true });
 
-    const maskBuffer = await sharp(Buffer.from(sqMask.buffer), {
-      raw: { width: SQ, height: SQ, channels: 4 }
-    }).png().toBuffer();
+      let maskedPixelCount = 0;
+      for (let i = 0; i < SQ * SQ; i++) {
+        const brightness = (sqMask[i * 4] + sqMask[i * 4 + 1] + sqMask[i * 4 + 2]) / 3;
+        if (brightness < 128) {
+          sqPixels[i * 4] = 0; sqPixels[i * 4 + 1] = 0; sqPixels[i * 4 + 2] = 0; sqPixels[i * 4 + 3] = 0;
+          sqMask[i * 4] = 0; sqMask[i * 4 + 1] = 0; sqMask[i * 4 + 2] = 0; sqMask[i * 4 + 3] = 0;
+          maskedPixelCount++;
+        } else {
+          sqMask[i * 4] = 255; sqMask[i * 4 + 1] = 255; sqMask[i * 4 + 2] = 255; sqMask[i * 4 + 3] = 255;
+        }
+      }
 
-    console.log('[removal-preview] Image PNG:', Math.round(imageBuffer.length / 1024), 'KB,',
-      'Mask PNG:', Math.round(maskBuffer.length / 1024), 'KB');
+      console.log('[removal-preview] OpenAI fallback — masked pixels:', maskedPixelCount);
+      const imageBuffer = await sharp(Buffer.from(sqPixels.buffer), { raw: { width: SQ, height: SQ, channels: 4 } }).png().toBuffer();
+      const maskBuffer = await sharp(Buffer.from(sqMask.buffer), { raw: { width: SQ, height: SQ, channels: 4 } }).png().toBuffer();
 
-    // ── Step 4: Call gpt-image-1 images.edit ──
-    console.log('[removal-preview] Calling gpt-image-1 images.edit...');
+      const { toFile } = await import('openai');
+      const imageFile = await toFile(imageBuffer, 'photo.png', { type: 'image/png' });
+      const maskFile = await toFile(maskBuffer, 'mask.png', { type: 'image/png' });
 
-    // Use OpenAI's toFile helper for reliable uploads
-    const { toFile } = await import('openai');
-    const imageFile = await toFile(imageBuffer, 'photo.png', { type: 'image/png' });
-    const maskFile = await toFile(maskBuffer, 'mask.png', { type: 'image/png' });
+      const editResponse = await openaiClient.images.edit({
+        model: 'gpt-image-1',
+        image: imageFile,
+        mask: maskFile,
+        prompt: 'Fill ONLY the transparent masked area with what would realistically be behind the removed plant. Seamlessly continue the exact surrounding materials — brick mortar pattern, vinyl siding lap lines, stucco texture, concrete, mulch, soil, or grass. Match the exact color temperature, shadow direction, surface weathering, and grain of adjacent surfaces. Preserve every pixel outside the masked region identically. Shot on Canon EOS R5, 35mm lens, f/8, natural daylight, RAW photograph.',
+        n: 1,
+        size: '1024x1024',
+        quality: 'high',
+      });
 
-    const editResponse = await openaiClient.images.edit({
-      model: 'gpt-image-1',
-      image: imageFile,
-      mask: maskFile,
-      prompt: 'Fill ONLY the transparent masked area with what would realistically be behind the removed plant. Seamlessly continue the exact surrounding materials — brick mortar pattern, vinyl siding lap lines, stucco texture, concrete, mulch, soil, or grass. Match the exact color temperature, shadow direction, surface weathering, and grain of adjacent surfaces. Preserve every pixel outside the masked region identically. Shot on Canon EOS R5, 35mm lens, f/8, natural daylight, RAW photograph.',
-      n: 1,
-      size: '1024x1024',
-      quality: 'high',
-    });
-
-    // gpt-image-1 returns b64_json by default
-    const resultData = editResponse.data[0];
-    let resultBuffer;
-
-    if (resultData.b64_json) {
-      resultBuffer = Buffer.from(resultData.b64_json, 'base64');
-      console.log('[removal-preview] Got b64_json result');
-    } else if (resultData.url) {
-      console.log('[removal-preview] Got URL result, downloading...');
-      const dlRes = await fetch(resultData.url);
-      resultBuffer = Buffer.from(await dlRes.arrayBuffer());
-    } else {
-      throw new Error('gpt-image-1 returned no image data');
+      const resultData = editResponse.data[0];
+      if (resultData.b64_json) {
+        resultBuffer = Buffer.from(resultData.b64_json, 'base64');
+      } else if (resultData.url) {
+        const dlRes = await fetch(resultData.url);
+        resultBuffer = Buffer.from(await dlRes.arrayBuffer());
+      } else {
+        throw new Error('gpt-image-1 returned no image data');
+      }
     }
 
-    console.log('[removal-preview] gpt-image-1 inpainting complete');
+    if (!resultBuffer) throw new Error('No AI image provider available');
 
-    // ── Step 5: Resize back to original aspect ratio ──
     const finalBuffer = await sharp(resultBuffer)
-      .resize(origW, origH, { fit: 'fill' }) // un-stretch back to original proportions
+      .resize(origW, origH, { fit: 'fill' })
       .jpeg({ quality: 92 })
       .toBuffer();
 
     const resultDataUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
-
     console.log('[removal-preview] Complete:', Math.round(finalBuffer.length / 1024), 'KB');
     res.json({ previewUrl: resultDataUrl });
   } catch (err) {
@@ -1390,12 +1405,12 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
   }
 });
 
-// ─── Design Render (gpt-image-1 — new plants inpainted onto property photo) ──
+// ─── Design Render (Gemini primary, gpt-image-1 fallback — new plants inpainted onto property photo) ──
 app.post('/api/design-render', authenticate, async (req, res) => {
   try {
     const { photoUrl, designPlants, keptPlants, removedPlants, designStyle, narrative, maskDataUrl } = req.body;
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
-    if (!openaiClient) return res.status(500).json({ error: 'OpenAI not configured' });
+    if (!googleAI && !openaiClient) return res.status(500).json({ error: 'No AI image provider configured' });
 
     // SSRF protection — only allow Supabase Storage URLs or data URLs
     if (!photoUrl.startsWith('data:')) {
@@ -1413,86 +1428,19 @@ app.post('/api/design-render', authenticate, async (req, res) => {
     }
 
     console.log('[design-render] Downloading original photo...');
-    const photoResponse = await fetch(photoUrl);
-    if (!photoResponse.ok) throw new Error(`Failed to download photo: ${photoResponse.status}`);
-    const photoBuffer = Buffer.from(await photoResponse.arrayBuffer());
+    let photoBuffer;
+    if (photoUrl.startsWith('data:')) {
+      const b64 = photoUrl.replace(/^data:image\/[^;]+;base64,/, '');
+      photoBuffer = Buffer.from(b64, 'base64');
+    } else {
+      const photoResponse = await fetch(photoUrl);
+      if (!photoResponse.ok) throw new Error(`Failed to download photo: ${photoResponse.status}`);
+      photoBuffer = Buffer.from(await photoResponse.arrayBuffer());
+    }
 
     const metadata = await sharp(photoBuffer).metadata();
     const origW = metadata.width;
     const origH = metadata.height;
-    const SQ = 1024;
-
-    // Resize photo to 1024x1024
-    const { data: sqPixels } = await sharp(photoBuffer)
-      .resize(SQ, SQ, { fit: 'fill' })
-      .ensureAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
-    // Build mask: ONLY edit the drawn bed prep areas (where user circled plants in Step 4)
-    // If no drawn mask provided, use a conservative landscape bed zone (bottom 35%)
-    const maskPixels = Buffer.alloc(SQ * SQ * 4);
-    let maskedCount = 0;
-
-    if (maskDataUrl) {
-      // Use the exact drawn mask from bed prep — only edit where user drew
-      const b64 = maskDataUrl.replace(/^data:image\/png;base64,/, '');
-      const rawMask = Buffer.from(b64, 'base64');
-      const { data: drawnMask } = await sharp(rawMask)
-        .resize(SQ, SQ, { fit: 'fill' }).ensureAlpha().raw()
-        .toBuffer({ resolveWithObject: true });
-
-      for (let i = 0; i < SQ * SQ; i++) {
-        const brightness = (drawnMask[i * 4] + drawnMask[i * 4 + 1] + drawnMask[i * 4 + 2]) / 3;
-        if (brightness < 128) {
-          // Drawn area — make transparent for editing
-          sqPixels[i * 4 + 0] = 0;
-          sqPixels[i * 4 + 1] = 0;
-          sqPixels[i * 4 + 2] = 0;
-          sqPixels[i * 4 + 3] = 0;
-          maskPixels[i * 4 + 3] = 0; // transparent = edit
-          maskedCount++;
-        } else {
-          // Keep area — opaque white
-          maskPixels[i * 4 + 0] = 255;
-          maskPixels[i * 4 + 1] = 255;
-          maskPixels[i * 4 + 2] = 255;
-          maskPixels[i * 4 + 3] = 255;
-        }
-      }
-    } else {
-      // No drawn mask — use conservative bottom 35% as the landscape bed zone
-      const editStartY = Math.round(SQ * 0.65);
-      for (let y = 0; y < SQ; y++) {
-        for (let x = 0; x < SQ; x++) {
-          const i = y * SQ + x;
-          if (y >= editStartY) {
-            sqPixels[i * 4 + 0] = 0;
-            sqPixels[i * 4 + 1] = 0;
-            sqPixels[i * 4 + 2] = 0;
-            sqPixels[i * 4 + 3] = 0;
-            maskPixels[i * 4 + 3] = 0;
-            maskedCount++;
-          } else {
-            maskPixels[i * 4 + 0] = 255;
-            maskPixels[i * 4 + 1] = 255;
-            maskPixels[i * 4 + 2] = 255;
-            maskPixels[i * 4 + 3] = 255;
-          }
-        }
-      }
-    }
-
-    console.log('[design-render] Masked pixels:', maskedCount, 'of', SQ * SQ,
-      '(' + Math.round(maskedCount / (SQ * SQ) * 100) + '%)');
-
-    const imageBuffer = await sharp(Buffer.from(sqPixels.buffer), {
-      raw: { width: SQ, height: SQ, channels: 4 }
-    }).png().toBuffer();
-
-    const maskBuffer = await sharp(Buffer.from(maskPixels.buffer), {
-      raw: { width: SQ, height: SQ, channels: 4 }
-    }).png().toBuffer();
 
     // Build plant description by layer
     const plantsByLayer = {};
@@ -1506,32 +1454,130 @@ app.post('/api/design-render', authenticate, async (req, res) => {
       .join('. ');
 
     console.log('[design-render] Plant description:', plantDesc);
-    console.log('[design-render] Calling gpt-image-1 images.edit...');
 
-    const { toFile } = await import('openai');
-    const imageFile = await toFile(imageBuffer, 'photo.png', { type: 'image/png' });
-    const maskFile = await toFile(maskBuffer, 'mask.png', { type: 'image/png' });
+    const designPrompt = `Professional landscape installation photograph. In the landscape bed areas of this residential property, install these plants: ${plantDesc}. Style: ${designStyle || 'naturalistic'}. Fresh aged hardwood mulch (dark brown, natural texture) fills all bed space between plants with clean steel edging borders. Each plant is at realistic mature size with natural leaf detail and shadow casting. Preserve the house, driveway, lawn, sky, and all existing features exactly as they are. Shot on Canon EOS R5, 35mm lens, f/8, golden hour natural light.`;
 
-    const editResponse = await openaiClient.images.edit({
-      model: 'gpt-image-1',
-      image: imageFile,
-      mask: maskFile,
-      prompt: `Professional landscape installation photograph. Install these exact plants ONLY in the transparent/masked bed areas: ${plantDesc}. Style: ${designStyle || 'naturalistic'}. Fresh aged hardwood mulch (dark brown, natural texture) fills all bed space between plants with clean steel edging borders. Each plant is photographed at realistic mature size with natural leaf detail, shadow casting, and depth of field. Plants have realistic imperfections — slight leaf curl, natural color variation, visible soil at base. Do NOT alter anything outside the masked area — the house facade, roof, windows, driveway, sidewalk, lawn, sky, and all existing features must remain pixel-identical to the original photograph. Shot on Canon EOS R5, 35mm lens, f/8, golden hour natural light, editorial landscape photography.`,
-      n: 1,
-      size: '1024x1024',
-      quality: 'high',
-    });
-
-    const resultData = editResponse.data[0];
     let resultBuffer;
-    if (resultData.b64_json) {
-      resultBuffer = Buffer.from(resultData.b64_json, 'base64');
-    } else if (resultData.url) {
-      const dlRes = await fetch(resultData.url);
-      resultBuffer = Buffer.from(await dlRes.arrayBuffer());
-    } else {
-      throw new Error('gpt-image-1 returned no image data');
+
+    // Try Gemini first (faster, cheaper)
+    if (googleAI) {
+      console.log('[design-render] Calling Gemini gemini-2.0-flash-preview-image-generation...');
+      try {
+        // Resize to reasonable size for Gemini
+        const resizedBuffer = await sharp(photoBuffer)
+          .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 85 })
+          .toBuffer();
+        const imageBase64 = resizedBuffer.toString('base64');
+
+        const response = await googleAI.models.generateContent({
+          model: 'gemini-2.0-flash-preview-image-generation',
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { inlineData: { mimeType: 'image/jpeg', data: imageBase64 } },
+                { text: designPrompt },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['image', 'text'],
+          },
+        });
+
+        // Extract generated image from response
+        const parts = response.candidates?.[0]?.content?.parts || [];
+        const imagePart = parts.find(p => p.inlineData);
+        if (imagePart?.inlineData?.data) {
+          resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
+          console.log('[design-render] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
+        } else {
+          const textPart = parts.find(p => p.text);
+          console.warn('[design-render] Gemini returned no image. Text:', textPart?.text?.substring(0, 200));
+          throw new Error('Gemini returned no image data');
+        }
+      } catch (geminiErr) {
+        console.warn('[design-render] Gemini failed:', geminiErr.message, '— falling back to gpt-image-1');
+        resultBuffer = null; // Fall through to OpenAI
+      }
     }
+
+    // Fallback to gpt-image-1 if Gemini failed or unavailable
+    if (!resultBuffer && openaiClient) {
+      console.log('[design-render] Falling back to gpt-image-1 images.edit...');
+      const SQ = 1024;
+      const { data: sqPixels } = await sharp(photoBuffer)
+        .resize(SQ, SQ, { fit: 'fill' })
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+      const maskPixels = Buffer.alloc(SQ * SQ * 4);
+      let maskedCount = 0;
+
+      if (maskDataUrl) {
+        const b64 = maskDataUrl.replace(/^data:image\/png;base64,/, '');
+        const rawMask = Buffer.from(b64, 'base64');
+        const { data: drawnMask } = await sharp(rawMask)
+          .resize(SQ, SQ, { fit: 'fill' }).ensureAlpha().raw()
+          .toBuffer({ resolveWithObject: true });
+        for (let i = 0; i < SQ * SQ; i++) {
+          const brightness = (drawnMask[i * 4] + drawnMask[i * 4 + 1] + drawnMask[i * 4 + 2]) / 3;
+          if (brightness < 128) {
+            sqPixels[i * 4] = 0; sqPixels[i * 4 + 1] = 0; sqPixels[i * 4 + 2] = 0; sqPixels[i * 4 + 3] = 0;
+            maskPixels[i * 4 + 3] = 0;
+            maskedCount++;
+          } else {
+            maskPixels[i * 4] = 255; maskPixels[i * 4 + 1] = 255; maskPixels[i * 4 + 2] = 255; maskPixels[i * 4 + 3] = 255;
+          }
+        }
+      } else {
+        const editStartY = Math.round(SQ * 0.65);
+        for (let y = 0; y < SQ; y++) {
+          for (let x = 0; x < SQ; x++) {
+            const i = y * SQ + x;
+            if (y >= editStartY) {
+              sqPixels[i * 4] = 0; sqPixels[i * 4 + 1] = 0; sqPixels[i * 4 + 2] = 0; sqPixels[i * 4 + 3] = 0;
+              maskPixels[i * 4 + 3] = 0;
+              maskedCount++;
+            } else {
+              maskPixels[i * 4] = 255; maskPixels[i * 4 + 1] = 255; maskPixels[i * 4 + 2] = 255; maskPixels[i * 4 + 3] = 255;
+            }
+          }
+        }
+      }
+
+      console.log('[design-render] OpenAI fallback — masked pixels:', maskedCount);
+      const imageBuffer = await sharp(Buffer.from(sqPixels.buffer), { raw: { width: SQ, height: SQ, channels: 4 } }).png().toBuffer();
+      const maskBuffer = await sharp(Buffer.from(maskPixels.buffer), { raw: { width: SQ, height: SQ, channels: 4 } }).png().toBuffer();
+
+      const { toFile } = await import('openai');
+      const imageFile = await toFile(imageBuffer, 'photo.png', { type: 'image/png' });
+      const maskFile = await toFile(maskBuffer, 'mask.png', { type: 'image/png' });
+
+      const editResponse = await openaiClient.images.edit({
+        model: 'gpt-image-1',
+        image: imageFile,
+        mask: maskFile,
+        prompt: designPrompt,
+        n: 1,
+        size: '1024x1024',
+        quality: 'high',
+      });
+
+      const resultData = editResponse.data[0];
+      if (resultData.b64_json) {
+        resultBuffer = Buffer.from(resultData.b64_json, 'base64');
+      } else if (resultData.url) {
+        const dlRes = await fetch(resultData.url);
+        resultBuffer = Buffer.from(await dlRes.arrayBuffer());
+      } else {
+        throw new Error('gpt-image-1 returned no image data');
+      }
+    }
+
+    if (!resultBuffer) throw new Error('No AI image provider available');
 
     // Resize back to original aspect ratio
     const finalBuffer = await sharp(resultBuffer)
@@ -2913,6 +2959,7 @@ app.get('/api/export/plants/csv', authenticate, async (req, res) => {
 
 const callAI = createAIHandler(db);
 const openaiClient = config.openai.apiKey ? new OpenAI({ apiKey: config.openai.apiKey }) : null;
+const googleAI = process.env.GOOGLE_AI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY }) : null;
 
 async function callManusAI(taskType, data) {
   // Legacy function name kept for compatibility — routes to direct OpenAI calls
