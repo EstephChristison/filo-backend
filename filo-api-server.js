@@ -1412,7 +1412,7 @@ app.post('/api/design-render', authenticate, async (req, res) => {
 2. DO NOT ALTER the driveway, walkways, vehicles, lawn shape, sky, trees in the background, or anything outside the landscape bed area.
 3. ONLY ADD PLANTS inside the existing mulch/bed area along the house foundation.
 
-PLANT INSTALLATION — ${designStyle || 'naturalistic'} style:
+PLANT INSTALLATION — ${designStyle || 'naturalistic'} style (render EXACTLY this quantity of each plant, no more, no less):
 ${plantDesc}
 
 Back row plants go against the house wall — these are SHRUBS (rounded, bushy, 4-6ft), NOT trees. Middle row plants fill the center of the bed. Front row plants line the bed edge as low groundcover or border.
@@ -2022,7 +2022,9 @@ YOUR DESIGN PHILOSOPHY:
   • BACK ROW (foundation layer against structure): Tall evergreen shrubs 5-8ft mature (3-5 gal). Ligustrum japonicum, Podocarpus macrophyllus, Wax Leaf Privet, Pittosporum tobira, Viburnum odoratissimum
   • MIDDLE ROW (color & texture pop): Medium shrubs 3-5ft mature (1-3 gal). Loropetalum chinense, Knockout Roses, Indian Hawthorn, Drift Roses, Azalea indica, Camellia sasanqua, Abelia
   • FRONT ROW (border & groundcover): Low plants under 2ft (1 gal / 4" pots). Asian Jasmine, Dwarf Mondo Grass, Liriope, Society Garlic, Gulf Muhly, Dwarf Mexican Petunia
+- If the client requested SPECIFIC PLANTS, use exactly those plants. Do not substitute or add extras unless needed to fill a layer the client didn't mention.
 - ALWAYS use odd-number groupings (3, 5, 7) — never plant a single specimen unless it's a focal tree
+- Keep the palette tight: 3-5 total species MAX. Do not add filler plants the client didn't ask for.
 - Repeat 2-3 key varieties for rhythm and a cohesive, professional look
 - Space plants at 75% of mature width for full coverage within 18 months
 - Include steel edging (typically 40-80 LF) and 3-4" hardwood mulch over weed barrier
@@ -2054,7 +2056,7 @@ Return ONLY valid JSON with this exact structure:
               role: 'user',
               content: userContent,
             }],
-            temperature: 0.7,
+            temperature: 0.3,
             response_format: { type: 'json_object' },
             max_tokens: 4000,
           });
