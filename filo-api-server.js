@@ -1388,22 +1388,27 @@ app.post('/api/design-render', authenticate, async (req, res) => {
     const origW = metadata.width;
     const origH = metadata.height;
 
-    // Build plant description by layer with visual detail
-    const sizeGuide = { back: '4-6 ft tall shrubs', middle: '2-3 ft tall plants', front: '6-12 inch low groundcover' };
+    // Build plant description by layer with visual detail and real dimensions
+    const layerDimensions = {
+      back: { height: '4-6 ft', desc: 'tall rounded evergreen shrubs against the wall — NOT trees, NOT vines, NOT climbing plants' },
+      middle: { height: '2-4 ft', desc: 'medium rounded flowering shrubs' },
+      front: { height: '6-18 inches', desc: 'low border plants or groundcover along the bed edge' },
+    };
     const plantsByLayer = {};
     for (const p of (designPlants || [])) {
       const layer = p.layer || 'middle';
       if (!plantsByLayer[layer]) plantsByLayer[layer] = [];
       const name = p.common_name || p.plant_name;
       const size = p.container_size || '';
-      plantsByLayer[layer].push(`${p.quantity || 1}x ${name}${size ? ' (' + size + ')' : ''}`);
+      const dim = layerDimensions[layer] || layerDimensions.middle;
+      plantsByLayer[layer].push(`${p.quantity || 1}x ${name}${size ? ' (' + size + ')' : ''} — render as ${dim.height} tall, compact rounded shape, spaced ${p.spacing_inches || 36}" apart`);
     }
     const plantDesc = Object.entries(plantsByLayer)
       .map(([layer, plants]) => {
-        const guide = sizeGuide[layer] || '';
-        return `${layer.toUpperCase()} ROW (${guide}): ${plants.join(', ')}`;
+        const dim = layerDimensions[layer] || layerDimensions.middle;
+        return `${layer.toUpperCase()} ROW (${dim.desc}, max ${dim.height} tall):\n${plants.join('\n')}`;
       })
-      .join('. ');
+      .join('\n\n');
 
     console.log('[design-render] Plant description:', plantDesc);
 
@@ -1417,11 +1422,13 @@ app.post('/api/design-render', authenticate, async (req, res) => {
 EXACT PLANT LIST TO RENDER (${designStyle || 'naturalistic'} style):
 ${plantDesc}
 
-PLACEMENT RULES:
-- Back row plants go against the house wall — these are SHRUBS (rounded, bushy, 4-6ft), NOT trees.
-- Middle row plants fill the center of the bed.
-- Front row plants line the bed edge as low groundcover or border.
-- If only one species is listed, fill the entire bed with that species at appropriate spacing. Do NOT invent other plants.
+CRITICAL SIZE AND SHAPE RULES:
+- NO plant may exceed its listed height. A "4-6 ft" shrub must NOT reach the roofline or cover windows.
+- All shrubs must be COMPACT and ROUNDED — like neatly pruned nursery stock. No sprawling, no climbing, no vine-like growth.
+- Do NOT recreate or mimic any plants that were previously in the photo. Render ONLY the listed species.
+- Back row: evenly spaced rounded shrubs against the wall, tops well below any windows.
+- Front row: low, dense border along the bed edge, never taller than 18 inches.
+- If only one species is listed, fill the entire bed with that single species at appropriate spacing.
 
 Render every plant in FULL BLOOM with flowers showing at peak season. Fill bare soil between plants with fresh dark brown hardwood mulch. Clean steel edging defines the bed border.
 
