@@ -689,6 +689,13 @@ app.get('/api/company', authenticate, async (req, res) => {
 app.put('/api/company', authenticate, requireAdmin, async (req, res) => {
   try {
     const fields = req.body;
+
+    // --- Issue 5 fix: Map frontend "address" to DB column "address_line1" ---
+    if (fields.address !== undefined && fields.address_line1 === undefined) {
+      fields.address_line1 = fields.address;
+      delete fields.address;
+    }
+
     const allowed = [
       'name', 'phone', 'email', 'website', 'address_line1', 'address_line2',
       'city', 'state', 'zip', 'country', 'license_number', 'timezone',
@@ -740,7 +747,17 @@ app.put('/api/company', authenticate, requireAdmin, async (req, res) => {
 app.put('/api/company/onboarding', authenticate, requireAdmin, async (req, res) => {
   try {
     await db.query('UPDATE companies SET onboarding_completed = true WHERE id = $1', [req.user.companyId]);
-    res.json({ message: 'Onboarding completed' });
+    res.json({ message: 'Onboarding completed', onboardingCompleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Issue 5 fix: Add POST /api/onboarding/complete as an alternative endpoint ---
+app.post('/api/onboarding/complete', authenticate, async (req, res) => {
+  try {
+    await db.query('UPDATE companies SET onboarding_completed = true WHERE id = $1', [req.user.companyId]);
+    res.json({ message: 'Onboarding completed', onboardingCompleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
