@@ -604,6 +604,23 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   }
 });
 
+// ─── Admin password reset (temporary — remove after use) ────────
+app.post('/api/auth/admin-reset', async (req, res) => {
+  try {
+    const { email, password, secret } = req.body;
+    if (secret !== 'filo-temp-reset-2026') return res.status(403).json({ error: 'Forbidden' });
+    const hash = await bcrypt.hash(password, 12);
+    const result = await db.query(
+      'UPDATE users SET password_hash = $1, recovery_token = NULL WHERE email = $2 RETURNING id, email',
+      [hash, email]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    res.json({ message: 'Password reset', user: result.rows[0].email });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Reset Password (with token) ───────────────────────────────
 app.post('/api/auth/reset-password', authLimiter, async (req, res) => {
   try {
