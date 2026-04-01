@@ -19,6 +19,8 @@ import { v4 as uuidv4 } from 'uuid';
 import pg from 'pg';
 import Stripe from 'stripe';
 import sharp from 'sharp';
+import OpenAI from 'openai';
+import { createAIHandler } from './filo-ai-pipeline.js';
 
 // ─── Configuration ───────────────────────────────────────────────
 
@@ -395,6 +397,7 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+    if (typeof email !== 'string' || email.length > 320) return res.status(400).json({ error: 'Invalid email' });
 
     const user = await db.getOne(
       `SELECT u.*, c.name as company_name, c.onboarding_completed FROM users u JOIN companies c ON c.id = u.company_id WHERE u.email = $1`,
@@ -447,6 +450,9 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
 app.post('/api/auth/refresh', async (req, res) => {
   try {
     const { refreshToken } = req.body;
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      return res.status(400).json({ error: 'Refresh token required' });
+    }
     const decoded = jwt.verify(refreshToken, config.jwtRefreshSecret);
 
     const tokens = await db.getMany(
@@ -2370,8 +2376,8 @@ app.put('/api/estimates/:id', authenticate, async (req, res) => {
       if (req.body[key] !== undefined) { updates.push(`${key} = $${idx}`); values.push(req.body[key]); idx++; }
     }
     if (updates.length === 0) return res.json({ message: 'No fields to update' });
-    values.push(req.params.id);
-    const updated = await db.getOne(`UPDATE estimates SET ${updates.join(', ')} WHERE id = $${idx} RETURNING *`, values);
+    values.push(req.params.id, req.user.companyId);
+    const updated = await db.getOne(`UPDATE estimates SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = $${idx + 1} RETURNING *`, values);
     const lineItems = await db.getMany('SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [req.params.id]);
     res.json({ ...updated, line_items: lineItems });
   } catch (err) {
@@ -2737,15 +2743,6 @@ app.get('/api/export/plants/csv', authenticate, async (req, res) => {
 // AI INTEGRATION (Direct OpenAI API via filo-ai-pipeline.js)
 // ═══════════════════════════════════════════════════════════════════
 
-// Import and initialize: const { createAIHandler } = await import('./filo-ai-pipeline.js');
-// const callAI = createAIHandler(db);
-// Then replace all callManusAI() calls with callAI()
-
-// For now, this wrapper delegates to the AI pipeline module.
-// If OPENAI_API_KEY is not set, returns graceful fallbacks for development.
-
-import OpenAI from 'openai';
-import { createAIHandler } from './filo-ai-pipeline.js';
 const callAI = createAIHandler(db);
 const openaiClient = config.openai.apiKey ? new OpenAI({ apiKey: config.openai.apiKey }) : null;
 
@@ -2912,8 +2909,8 @@ app.get('/api/ai/health', authenticate, (req, res) => {
 app.post('/api/ai/detect-plants', authenticate, aiRateLimit, async (req, res) => {
   try {
     if (!openaiClient) return res.status(503).json({ error: 'AI service not configured' });
-    const { imageBase64, location, usdaZone } = req.body;
-    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 is required' });
+    const { imageUrl, location, usdaZone } = req.body;
+    if (!imageUrl) return res.status(400).json({ error: 'imageUrl is required' });
 
     const locationContext = location
       ? `This property is in ${location.city}, ${location.state} (USDA Zone ${usdaZone || 'unknown'}).`
@@ -2940,7 +2937,7 @@ Return ONLY valid JSON: { "plants": [...] }`,
         {
           role: 'user',
           content: [
-            { type: 'image_url', image_url: { url: imageBase64, detail: 'high' } },
+            { type: 'image_url', image_url: { url: imageUrl, detail: 'high' } },
             { type: 'text', text: `Identify all plants in this residential landscape photo. ${locationContext} Return the JSON analysis.` },
           ],
         },
@@ -3376,7 +3373,8 @@ app.use((err, req, res, next) => {
   if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'File too large. Maximum is 25MB.' });
   // Default
   console.error('Unhandled error:', err.status, err.type, err.message);
-  res.status(err.status && err.status < 500 ? err.status : 500).json({ error: err.status < 500 ? err.message : 'Internal server error' });
+  const statusCode = (err.status && typeof err.status === 'number' && err.status >= 400 && err.status < 500) ? err.status : 500;
+  res.status(statusCode).json({ error: statusCode < 500 ? err.message : 'Internal server error' });
 });
 
 // ─── Startup Environment Checks ──────────────────────────────────
