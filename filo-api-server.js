@@ -164,6 +164,22 @@ function sanitizeFilename(name) {
     .substring(0, 200) || 'upload';
 }
 
+// ─── User Response Formatter ────────────────────────────────────
+// Issue 4 fix: Ensure consistent camelCase user object across all auth endpoints
+function formatUserResponse(user) {
+  return {
+    id: user.id,
+    email: user.email,
+    firstName: user.first_name || user.firstName || null,
+    lastName: user.last_name || user.lastName || null,
+    role: user.role,
+    companyId: user.company_id || user.companyId,
+    companyName: user.company_name || user.companyName || null,
+    onboardingCompleted: user.onboarding_completed ?? user.onboardingCompleted ?? false,
+    phone: user.phone || null,
+  };
+}
+
 // ─── Database Helper ─────────────────────────────────────────────
 
 const db = {
@@ -386,7 +402,12 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
 
     await logActivity(result.companyId, result.userId, 'company', result.companyId, 'register', `Company "${companyName}" registered`);
 
-    res.status(201).json({ token, refreshToken, user: { id: result.userId, companyId: result.companyId, role: result.role } });
+    // Issue 4 fix: Return consistent user object shape
+    res.status(201).json({ token, refreshToken, user: formatUserResponse({
+      id: result.userId, email, first_name: firstName, last_name: lastName,
+      role: result.role, company_id: result.companyId, company_name: companyName,
+      onboarding_completed: false, phone,
+    }) });
   } catch (err) {
     console.error('Register error:', err);
     if (err.code === '22001') return res.status(400).json({ error: 'One or more fields exceed maximum length' });
@@ -434,14 +455,8 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
     await db.query('UPDATE users SET last_login_at = NOW() WHERE id = $1', [user.id]);
     await logActivity(user.company_id, user.id, 'user', user.id, 'login', 'User logged in');
 
-    res.json({
-      token, refreshToken,
-      user: {
-        id: user.id, email: user.email, firstName: user.first_name, lastName: user.last_name,
-        role: user.role, companyId: user.company_id, companyName: user.company_name,
-        onboardingCompleted: user.onboarding_completed,
-      },
-    });
+    // Issue 4 fix: Use consistent formatUserResponse helper
+    res.json({ token, refreshToken, user: formatUserResponse(user) });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Login failed' });
@@ -550,7 +565,12 @@ app.post('/api/auth/accept-invite', async (req, res) => {
     );
 
     await logActivity(updated.company_id, updated.id, 'user', updated.id, 'invite_accepted', 'User accepted invite and set password');
-    res.json({ token, refreshToken, user: { id: updated.id, companyId: updated.company_id, role: updated.role } });
+    // Issue 4 fix: Use consistent formatUserResponse
+    const fullUser = await db.getOne(
+      `SELECT u.*, c.name as company_name, c.onboarding_completed FROM users u JOIN companies c ON c.id = u.company_id WHERE u.id = $1`,
+      [updated.id]
+    );
+    res.json({ token, refreshToken, user: formatUserResponse(fullUser || { id: updated.id, company_id: updated.company_id, role: updated.role }) });
   } catch (err) {
     console.error('Accept invite error:', err);
     res.status(500).json({ error: 'Failed to accept invite' });
