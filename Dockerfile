@@ -1,5 +1,5 @@
 FROM node:20-alpine
-
+# Gemini AI integration added 2026-04-01
 WORKDIR /app
 
 # Copy package files first for better caching
