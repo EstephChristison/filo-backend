@@ -1412,29 +1412,37 @@ app.post('/api/design-render', authenticate, async (req, res) => {
 
     console.log('[design-render] Plant description:', plantDesc);
 
-    const designPrompt = `STRICT RULES — READ EVERY RULE BEFORE GENERATING:
+    // Build kept plants description for prompt
+    const keptPlantsDesc = (keptPlants && keptPlants.length > 0)
+      ? keptPlants.map(p => `- ${p.common_name || p.plant_name || 'Existing plant'}`).join('\n')
+      : '';
 
-1. DO NOT ALTER THE HOUSE. Every architectural detail — windows, doors, brick pattern, siding, roofline, gutters, trim — must remain pixel-perfect identical to the input photo. Zero modifications to any structure.
-2. DO NOT ALTER the driveway, walkways, vehicles, lawn shape, sky, trees in the background, or anything outside the landscape bed area.
-3. ONLY ADD PLANTS inside the existing mulch/bed area along the house foundation.
-4. ONLY RENDER THE EXACT PLANTS LISTED BELOW. Do NOT add any plants, shrubs, vines, groundcover, or greenery that is not explicitly listed. If the list says azaleas only, render ONLY azaleas — no boxwood, no jasmine, no bougainvillea, no filler plants. Zero creative additions.
+    const designPrompt = `RULE #0 — EXISTING PLANT MATERIAL (HIGHEST PRIORITY):
+Leave ALL existing plant material in this photo EXACTLY as-is. Do NOT change, alter, update, move, resize, reshape, recolor, or remove ANY existing plants, trees, or shrubs that are already visible in this image. They must remain pixel-for-pixel identical to the input photo. You are ONLY adding NEW plants into the empty/bare areas around the existing plants.
+${keptPlantsDesc ? `\nExisting plants to preserve:\n${keptPlantsDesc}\n` : ''}
+RULE #1 — DO NOT ALTER THE HOUSE.
+Every architectural detail — windows, doors, brick pattern, siding, roofline, gutters, trim — must remain pixel-perfect identical to the input photo. Zero modifications to any structure.
 
-EXACT PLANT LIST TO RENDER (${designStyle || 'naturalistic'} style):
+RULE #2 — DO NOT ALTER ANYTHING OUTSIDE THE BED.
+Driveway, walkways, vehicles, lawn shape, sky, trees in the background — all untouched.
+
+RULE #3 — ONLY ADD NEW PLANTS INTO BARE/EMPTY AREAS.
+Only place new plants in areas that currently show bare mulch, bare soil, or empty bed space. Do NOT place new plants where existing plants already are.
+
+RULE #4 — ONLY RENDER THE EXACT PLANTS LISTED BELOW.
+Do NOT add any plants, shrubs, vines, groundcover, or greenery that is not explicitly listed. Zero creative additions.
+
+NEW PLANTS TO ADD (${designStyle || 'naturalistic'} style):
 ${plantDesc}
-${(keptPlants && keptPlants.length > 0) ? `
-PRESERVED PLANTS — DO NOT TOUCH:
-The following plants are ALREADY in the photo and must remain COMPLETELY UNCHANGED. Do not move them, resize them, change their species, alter their shape, or modify them in any way. They must appear pixel-identical to how they look in the input image:
-${keptPlants.map(p => `- ${p.common_name || p.plant_name || 'Existing plant'} (position: ${Math.round(p.position_x || 50)}% from left, ${Math.round(p.position_y || 50)}% from top)`).join('\n')}
-` : ''}
-CRITICAL SIZE AND SHAPE RULES:
-- SCALE REFERENCE: A typical residential window is about 4ft off the ground. Back row shrubs should reach NO HIGHER than the bottom of the windows — roughly 3-4ft tall in the image. They must NOT cover, overlap, or touch any window.
-- All shrubs must be COMPACT, ROUNDED, and INDIVIDUALLY DISTINCT — like neatly pruned nursery stock fresh from a garden center. Each plant should be clearly separate from its neighbors with mulch visible between them.
-- NO sprawling, NO climbing, NO vine-like growth, NO plants taller than 5ft. These are NEWLY PLANTED shrubs, not mature overgrown specimens.
-- Do NOT recreate or mimic any plants that were previously in the photo. Render ONLY the listed species.
-- Front row: low, dense border along the bed edge, never taller than 18 inches.
-- If only one species is listed, fill the entire bed with that single species at appropriate spacing.
 
-Render every plant in FULL BLOOM with flowers showing at peak season. Fill bare soil between plants with fresh dark brown hardwood mulch. Clean steel edging defines the bed border.
+SIZE AND SHAPE RULES FOR NEW PLANTS:
+- SCALE: Back row shrubs should reach NO HIGHER than the bottom of the windows — roughly 3-4ft tall. They must NOT cover, overlap, or touch any window.
+- All new shrubs must be COMPACT, ROUNDED, and INDIVIDUALLY DISTINCT — like neatly pruned nursery stock fresh from a garden center. Mulch visible between them.
+- NO sprawling, NO climbing, NO vine-like growth, NO plants taller than 5ft. These are NEWLY PLANTED, not mature overgrown specimens.
+- Front row: low, dense border along the bed edge, never taller than 18 inches.
+- If only one species is listed, fill the empty areas with that species at appropriate spacing.
+
+Render every new plant in FULL BLOOM with flowers showing at peak season. Fill bare soil between plants with fresh dark brown hardwood mulch. Clean steel edging defines the bed border.
 
 This must look like a real photograph taken after a professional landscape installation — natural lighting, real leaf textures, correct shadows. Do NOT make it look illustrated or AI-generated.`;
 
