@@ -1658,6 +1658,11 @@ Be thorough but realistic. Only identify plants you can see clearly.`
   }
 });
 
+// --- Issue 3 fix: Catch bare /upload/photos without areaId ---
+app.post('/api/upload/photos', authenticate, (req, res) => {
+  res.status(400).json({ error: 'Area ID is required. Use POST /api/upload/photos/:areaId' });
+});
+
 // Presigned URL for direct upload
 app.post('/api/upload/presign', authenticate, async (req, res) => {
   try {
@@ -2471,6 +2476,11 @@ app.post('/api/projects/:projectId/estimates/generate', authenticate, async (req
     console.error('Estimate generation error:', err);
     res.status(500).json({ error: 'Failed to generate estimate' });
   }
+});
+
+// --- Issue 3 fix: Catch bare /estimates/generate without projectId ---
+app.post('/api/estimates/generate', authenticate, (req, res) => {
+  res.status(400).json({ error: 'Project ID is required. Use POST /api/projects/:projectId/estimates/generate' });
 });
 
 app.get('/api/estimates/:id', authenticate, async (req, res) => {
