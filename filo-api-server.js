@@ -2101,8 +2101,11 @@ Plants being removed: ${removePlants || 'none'}`
 
           const sunExposure = project.sun_exposure || 'full_sun';
           const designStyle = project.design_style || 'naturalistic';
+          const maxSpecies = parseInt(project.max_species) || 3;
 
           let userPrompt = `Design a complete ${designStyle} landscape renovation for this property. Return your response as JSON.
+
+SPECIES LIMIT: Use EXACTLY ${maxSpecies} different plant species. No more, no less.${maxSpecies === 1 ? ' The ENTIRE bed should be filled with a single plant type.' : ''}
 
 LOCATION: ${locationStr}
 
@@ -2144,12 +2147,12 @@ ${styleGuide[designStyle] || styleGuide.naturalistic}
 RULE #1 — CLIENT REQUESTS OVERRIDE EVERYTHING:
 If the client specifies which plants they want, use ONLY those plants. Do NOT add any other species. If they say "only azaleas", the ENTIRE design is azaleas — no filler, no extras, no "complementary" plants. The client is the boss. Place their requested plants in the appropriate layers by mature height, and adjust quantities to fill the bed. Leave layers empty if the client's plants don't fit that layer — do NOT invent plants to fill empty layers.
 
-RULE #2 — WHEN THE CLIENT DOES NOT SPECIFY PLANTS:
-Only then do you choose plants yourself. Design in 3 professional layers:
+RULE #2 — SPECIES COUNT:
+The client has requested EXACTLY ${maxSpecies} different plant species. You must use exactly ${maxSpecies} species — no more, no less.${maxSpecies === 1 ? ' Use ONLY the one plant type the client specified (or pick one if they didn\'t specify).' : ''} When the client does not specify which plants, choose plants yourself for 3 professional layers:
   • BACK ROW (against structure): Tall evergreen shrubs 5-8ft mature (3-5 gal)
   • MIDDLE ROW (color & texture): Medium shrubs 3-5ft mature (1-3 gal)
   • FRONT ROW (border/groundcover): Low plants under 2ft (1 gal / 4" pots)
-Keep the palette tight: 3-5 total species MAX. Use odd-number groupings (3, 5, 7). Repeat varieties for rhythm.
+Use odd-number groupings (3, 5, 7). Repeat varieties for rhythm.
 
 RULE #3 — REMOVAL AND KEPT PLANTS:
 - If the client said to REMOVE a plant, do NOT include it or any variety of that species.
