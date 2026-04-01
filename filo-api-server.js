@@ -2129,7 +2129,7 @@ Plants being removed: ${removePlants || 'none'}`
 
           let userPrompt = `Design a complete ${designStyle} landscape renovation for this property. Return your response as JSON.
 
-SPECIES LIMIT: Use EXACTLY ${maxSpecies} different plant species. No more, no less.${maxSpecies === 1 ? ' The ENTIRE bed should be filled with a single plant type.' : ''}
+⚠️ HARD SPECIES LIMIT: You MUST use EXACTLY ${maxSpecies} different plant species total across ALL layers combined. Count your species before responding — if you have more than ${maxSpecies}, remove extras. If you have fewer than ${maxSpecies}, add more.${maxSpecies === 1 ? ' The ENTIRE bed must be filled with ONE single plant type only — the same species in every layer.' : ` Spread ${maxSpecies} species across the layers. The same species CAN appear in multiple layers — that still counts as 1 species.`}
 
 LOCATION: ${locationStr}
 
@@ -2171,8 +2171,8 @@ ${styleGuide[designStyle] || styleGuide.naturalistic}
 RULE #1 — CLIENT REQUESTS OVERRIDE EVERYTHING:
 If the client specifies which plants they want, use ONLY those plants. Do NOT add any other species. If they say "only azaleas", the ENTIRE design is azaleas — no filler, no extras, no "complementary" plants. The client is the boss. Place their requested plants in the appropriate layers by mature height, and adjust quantities to fill the bed. Leave layers empty if the client's plants don't fit that layer — do NOT invent plants to fill empty layers.
 
-RULE #2 — SPECIES COUNT:
-The client has requested EXACTLY ${maxSpecies} different plant species. You must use exactly ${maxSpecies} species — no more, no less.${maxSpecies === 1 ? ' Use ONLY the one plant type the client specified (or pick one if they didn\'t specify).' : ''} When the client does not specify which plants, choose plants yourself for 3 professional layers:
+RULE #2 — SPECIES COUNT (STRICTLY ENFORCED):
+The client has requested EXACTLY ${maxSpecies} different plant species. Before you output JSON, COUNT your unique species names. If your count ≠ ${maxSpecies}, FIX IT. This is non-negotiable.${maxSpecies === 1 ? ' Use ONLY ONE plant species. The same plant in every layer. Nothing else.' : ` Use exactly ${maxSpecies} unique plant names total. The same species in different layers counts as 1 species.`} When the client does not specify which plants, choose plants yourself for 3 professional layers:
   • BACK ROW (against structure): Tall evergreen shrubs 5-8ft mature (3-5 gal)
   • MIDDLE ROW (color & texture): Medium shrubs 3-5ft mature (1-3 gal)
   • FRONT ROW (border/groundcover): Low plants under 2ft (1 gal / 4" pots)
@@ -2233,21 +2233,22 @@ Return ONLY valid JSON with this exact structure:
             designPlants = parsed.plants || parsed.design || [];
             console.log('[design-gen] Used fallback, found:', designPlants.length, 'plants');
           }
-          // HARD ENFORCE species limit — if AI returned more species than requested, trim
-          if (designPlants.length > maxSpecies) {
-            console.log('[design-gen] AI returned %d species but max is %d — trimming', designPlants.length, maxSpecies);
-            // Keep the species with the highest quantities (most important to the design)
-            const speciesMap = {};
-            for (const dp of designPlants) {
-              const key = dp.common_name || dp.botanical_name;
-              if (!speciesMap[key]) speciesMap[key] = { name: key, totalQty: 0, items: [] };
-              speciesMap[key].totalQty += (dp.quantity || 1);
-              speciesMap[key].items.push(dp);
-            }
+          // HARD ENFORCE species limit — count UNIQUE species, not total entries
+          const speciesMap = {};
+          for (const dp of designPlants) {
+            const key = (dp.common_name || dp.botanical_name || '').toLowerCase().trim();
+            if (!speciesMap[key]) speciesMap[key] = { name: dp.common_name || dp.botanical_name, totalQty: 0, items: [] };
+            speciesMap[key].totalQty += (dp.quantity || 1);
+            speciesMap[key].items.push(dp);
+          }
+          const uniqueSpeciesCount = Object.keys(speciesMap).length;
+          console.log('[design-gen] Unique species count: %d, maxSpecies: %d', uniqueSpeciesCount, maxSpecies);
+          if (uniqueSpeciesCount > maxSpecies) {
+            console.log('[design-gen] AI returned %d unique species but max is %d — trimming', uniqueSpeciesCount, maxSpecies);
             const sorted = Object.values(speciesMap).sort((a, b) => b.totalQty - a.totalQty);
-            const keepSpecies = new Set(sorted.slice(0, maxSpecies).map(s => s.name));
-            designPlants = designPlants.filter(dp => keepSpecies.has(dp.common_name || dp.botanical_name));
-            console.log('[design-gen] Trimmed to %d species: %s', maxSpecies, [...keepSpecies].join(', '));
+            const keepSpecies = new Set(sorted.slice(0, maxSpecies).map(s => s.name.toLowerCase().trim()));
+            designPlants = designPlants.filter(dp => keepSpecies.has((dp.common_name || dp.botanical_name || '').toLowerCase().trim()));
+            console.log('[design-gen] Trimmed to %d species: %s', maxSpecies, sorted.slice(0, maxSpecies).map(s => s.name).join(', '));
           }
 
           const actualTotal = designPlants.reduce((s, p) => s + (p.quantity || 1), 0);
