@@ -1407,19 +1407,23 @@ app.post('/api/design-render', authenticate, async (req, res) => {
 
     console.log('[design-render] Plant description:', plantDesc);
 
-    const designPrompt = `STRICT RULES — READ BEFORE GENERATING:
+    const designPrompt = `STRICT RULES — READ EVERY RULE BEFORE GENERATING:
+
 1. DO NOT ALTER THE HOUSE. Every architectural detail — windows, doors, brick pattern, siding, roofline, gutters, trim — must remain pixel-perfect identical to the input photo. Zero modifications to any structure.
 2. DO NOT ALTER the driveway, walkways, vehicles, lawn shape, sky, trees in the background, or anything outside the landscape bed area.
 3. ONLY ADD PLANTS inside the existing mulch/bed area along the house foundation.
+4. ONLY RENDER THE EXACT PLANTS LISTED BELOW. Do NOT add any plants, shrubs, vines, groundcover, or greenery that is not explicitly listed. If the list says azaleas only, render ONLY azaleas — no boxwood, no jasmine, no bougainvillea, no filler plants. Zero creative additions.
 
-PLANT INSTALLATION — ${designStyle || 'naturalistic'} style (render EXACTLY this quantity of each plant, no more, no less):
+EXACT PLANT LIST TO RENDER (${designStyle || 'naturalistic'} style):
 ${plantDesc}
 
-Back row plants go against the house wall — these are SHRUBS (rounded, bushy, 4-6ft), NOT trees. Middle row plants fill the center of the bed. Front row plants line the bed edge as low groundcover or border.
+PLACEMENT RULES:
+- Back row plants go against the house wall — these are SHRUBS (rounded, bushy, 4-6ft), NOT trees.
+- Middle row plants fill the center of the bed.
+- Front row plants line the bed edge as low groundcover or border.
+- If only one species is listed, fill the entire bed with that species at appropriate spacing. Do NOT invent other plants.
 
-IMPORTANT: Render every plant in FULL BLOOM with flowers showing. Azaleas with pink/white blooms, roses with red/pink flowers, jasmine with white star-shaped flowers, liriope with purple flower spikes, etc. Show each plant at its peak flowering season — the client needs to see the color impact.
-
-Fill all bare soil between plants with fresh dark brown hardwood mulch. Clean steel edging defines the bed border.
+Render every plant in FULL BLOOM with flowers showing at peak season. Fill bare soil between plants with fresh dark brown hardwood mulch. Clean steel edging defines the bed border.
 
 This must look like a real photograph taken after a professional landscape installation — natural lighting, real leaf textures, correct shadows. Do NOT make it look illustrated or AI-generated.`;
 
@@ -1466,6 +1470,119 @@ This must look like a real photograph taken after a professional landscape insta
   } catch (err) {
     console.error('[design-render] Error:', err.message);
     res.status(500).json({ error: `Design render failed: ${err.message}` });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// DESIGN ADJUST — pin-based localized edits via Gemini
+// ═══════════════════════════════════════════════════════════════════
+
+app.post('/api/design-adjust', authenticate, aiRateLimit, async (req, res) => {
+  try {
+    const { renderDataUrl, pinX, pinY, radius, prompt } = req.body;
+    if (!renderDataUrl) return res.status(400).json({ error: 'renderDataUrl is required' });
+    if (pinX == null || pinY == null) return res.status(400).json({ error: 'pinX and pinY are required' });
+    if (!prompt || !prompt.trim()) return res.status(400).json({ error: 'prompt is required' });
+    if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
+
+    const safePrompt = stripHtml(prompt.trim());
+    const pctX = Math.max(0, Math.min(100, parseFloat(pinX)));
+    const pctY = Math.max(0, Math.min(100, parseFloat(pinY)));
+    const pctR = Math.max(3, Math.min(30, parseFloat(radius) || 10));
+
+    console.log('[design-adjust] Pin at (%d%, %d%) radius %d%, prompt: %s', pctX, pctY, pctR, safePrompt);
+
+    // Decode the rendered image
+    let imgBuffer;
+    if (renderDataUrl.startsWith('data:')) {
+      const b64 = renderDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
+      imgBuffer = Buffer.from(b64, 'base64');
+    } else {
+      const resp = await fetch(renderDataUrl);
+      if (!resp.ok) throw new Error(`Failed to download render: ${resp.status}`);
+      imgBuffer = Buffer.from(await resp.arrayBuffer());
+    }
+
+    const metadata = await sharp(imgBuffer).metadata();
+    const w = metadata.width;
+    const h = metadata.height;
+
+    // Build circular mask as SVG — white circle on black background
+    const cx = Math.round((pctX / 100) * w);
+    const cy = Math.round((pctY / 100) * h);
+    const r = Math.round((pctR / 100) * Math.min(w, h));
+
+    const maskSvg = Buffer.from(
+      `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="${w}" height="${h}" fill="black"/>
+        <circle cx="${cx}" cy="${cy}" r="${r}" fill="white"/>
+      </svg>`
+    );
+
+    const maskBuffer = await sharp(maskSvg).resize(w, h).png().toBuffer();
+
+    // Resize both to 1024x1024 for Gemini
+    const resizedImg = await sharp(imgBuffer)
+      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+
+    const resizedMask = await sharp(maskBuffer)
+      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .png()
+      .toBuffer();
+
+    const editPrompt = `You are editing a landscape design photo. A circular mask is provided — the WHITE area is the ONLY area you may modify. Every pixel OUTSIDE the white circle MUST remain byte-for-byte identical to the original.
+
+EDIT INSTRUCTION: ${safePrompt}
+
+STRICT RULES:
+1. ONLY modify pixels inside the white circular mask area.
+2. Do NOT alter the house, driveway, sky, lawn, or anything outside the circle.
+3. The edit must blend seamlessly with the surrounding landscape — match lighting, perspective, and scale.
+4. If adding plants, render them in FULL BLOOM with flowers showing at peak season.
+5. This must look like a real photograph, not illustrated or AI-generated.`;
+
+    console.log('[design-adjust] Calling Gemini gemini-2.5-flash-image...');
+    const response = await googleAI.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'image/jpeg', data: resizedImg.toString('base64') } },
+            { inlineData: { mimeType: 'image/png', data: resizedMask.toString('base64') } },
+            { text: editPrompt },
+          ],
+        },
+      ],
+      config: {
+        responseModalities: ['image', 'text'],
+      },
+    });
+
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    const imagePart = parts.find(p => p.inlineData);
+    if (!imagePart?.inlineData?.data) {
+      const textPart = parts.find(p => p.text);
+      throw new Error(textPart?.text || 'Gemini returned no image data');
+    }
+
+    const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
+    console.log('[design-adjust] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
+
+    // Upscale back to original dimensions
+    const finalBuffer = await sharp(resultBuffer)
+      .resize(w, h, { fit: 'fill' })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+
+    const resultDataUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
+    console.log('[design-adjust] Adjustment complete:', Math.round(finalBuffer.length / 1024), 'KB');
+    res.json({ renderUrl: resultDataUrl });
+  } catch (err) {
+    console.error('[design-adjust] Error:', err.message);
+    res.status(500).json({ error: `Design adjustment failed: ${err.message}` });
   }
 });
 
@@ -2015,25 +2132,26 @@ ${styleGuide[designStyle] || styleGuide.naturalistic}
             model: config.openai.model,
             messages: [{
               role: 'system',
-              content: `You are FILO — a master landscape architect with 50 years of hands-on residential design experience in the Gulf Coast region. You have personally installed thousands of beds in this exact zip code and microclimate. You know which plants thrive, which ones die in August heat, and which combinations create the "wow factor" that wins neighborhood awards.
+              content: `You are FILO — a master landscape architect with 50 years of hands-on residential design experience in the Gulf Coast region.
 
-YOUR DESIGN PHILOSOPHY:
-- Design in 3 professional layers like every high-end install:
-  • BACK ROW (foundation layer against structure): Tall evergreen shrubs 5-8ft mature (3-5 gal). Ligustrum japonicum, Podocarpus macrophyllus, Wax Leaf Privet, Pittosporum tobira, Viburnum odoratissimum
-  • MIDDLE ROW (color & texture pop): Medium shrubs 3-5ft mature (1-3 gal). Loropetalum chinense, Knockout Roses, Indian Hawthorn, Drift Roses, Azalea indica, Camellia sasanqua, Abelia
-  • FRONT ROW (border & groundcover): Low plants under 2ft (1 gal / 4" pots). Asian Jasmine, Dwarf Mondo Grass, Liriope, Society Garlic, Gulf Muhly, Dwarf Mexican Petunia
-- If the client requested SPECIFIC PLANTS, use exactly those plants. Do not substitute or add extras unless needed to fill a layer the client didn't mention.
-- ALWAYS use odd-number groupings (3, 5, 7) — never plant a single specimen unless it's a focal tree
-- Keep the palette tight: 3-5 total species MAX. Do not add filler plants the client didn't ask for.
-- Repeat 2-3 key varieties for rhythm and a cohesive, professional look
+RULE #1 — CLIENT REQUESTS OVERRIDE EVERYTHING:
+If the client specifies which plants they want, use ONLY those plants. Do NOT add any other species. If they say "only azaleas", the ENTIRE design is azaleas — no filler, no extras, no "complementary" plants. The client is the boss. Place their requested plants in the appropriate layers by mature height, and adjust quantities to fill the bed. Leave layers empty if the client's plants don't fit that layer — do NOT invent plants to fill empty layers.
+
+RULE #2 — WHEN THE CLIENT DOES NOT SPECIFY PLANTS:
+Only then do you choose plants yourself. Design in 3 professional layers:
+  • BACK ROW (against structure): Tall evergreen shrubs 5-8ft mature (3-5 gal)
+  • MIDDLE ROW (color & texture): Medium shrubs 3-5ft mature (1-3 gal)
+  • FRONT ROW (border/groundcover): Low plants under 2ft (1 gal / 4" pots)
+Keep the palette tight: 3-5 total species MAX. Use odd-number groupings (3, 5, 7). Repeat varieties for rhythm.
+
+RULE #3 — REMOVAL AND KEPT PLANTS:
+- If the client said to REMOVE a plant, do NOT include it or any variety of that species.
+- If the client said to KEEP a plant, note it as "(existing - keeping)" but do NOT count it in quantities or cost.
+
+GENERAL GUIDELINES:
 - Space plants at 75% of mature width for full coverage within 18 months
 - Include steel edging (typically 40-80 LF) and 3-4" hardwood mulch over weed barrier
-- Consider mature size, bloom season stagger, and year-round structure
-- Use real wholesale nursery pricing for your area ($8-15 for 1-gal, $22-38 for 3-gal, $35-55 for 5-gal, $120-180 for 15-gal trees)
-
-CRITICAL RULES:
-- If the client said to REMOVE a plant, it is being physically ripped out. Do NOT include it or any variety of that same species anywhere in your design.
-- If the client said to KEEP a plant, it stays. Note it as "(existing - keeping)" in the design but DO NOT count it in quantities or cost.
+- Use real wholesale nursery pricing ($8-15 for 1-gal, $22-38 for 3-gal, $35-55 for 5-gal, $120-180 for 15-gal trees)
 - Your design must ONLY contain NEW plants being installed (plus notes about what's staying).
 
 Return ONLY valid JSON with this exact structure:
@@ -2081,7 +2199,8 @@ Return ONLY valid JSON with this exact structure:
             designPlants = parsed.plants || parsed.design || [];
             console.log('[design-gen] Used fallback, found:', designPlants.length, 'plants');
           }
-          console.log('[design-gen] Total designPlants:', designPlants.length);
+          const actualTotal = designPlants.reduce((s, p) => s + (p.quantity || 1), 0);
+          console.log('[design-gen] Total designPlants: %d species, %d individual plants', designPlants.length, actualTotal);
 
           // Save design plants + narrative in design_data JSONB (design_plants table requires plant_library FK)
           await db.query(
@@ -2104,7 +2223,7 @@ Return ONLY valid JSON with this exact structure:
                 model: config.openai.model,
                 messages: [{
                   role: 'system',
-                  content: `You are FILO — a master landscape architect with 50 years of hands-on residential design experience in the Gulf Coast region. You know which plants thrive in this exact microclimate. Design in 3 professional layers (back foundation, middle color/texture, front border/groundcover). Use odd-number groupings (3, 5, 7). Use real wholesale pricing. CRITICAL: If the client said to REMOVE a plant, do NOT include it or any variety of that species anywhere in your design. Return ONLY valid JSON with: design_narrative, layers (back/middle/front arrays each with common_name, botanical_name, container_size, quantity, unit_cost, spacing_inches, notes), services (mulch_cy, soil_amendment_cy, edging_lf, bed_prep_sqft), total_plants.`
+                  content: `You are FILO — a master landscape architect. RULE #1: If the client specifies which plants they want, use ONLY those plants. Do NOT add any other species. If they say "only azaleas", the entire design is azaleas — no filler, no extras. Leave layers empty if the client's plants don't fit that layer. RULE #2: Only choose plants yourself if the client did not specify. Design in 3 layers (back/middle/front), 3-5 species max, odd-number groupings. Use real wholesale pricing. CRITICAL: If the client said to REMOVE a plant, do NOT include it or any variety of that species. Return ONLY valid JSON with: design_narrative, layers (back/middle/front arrays each with common_name, botanical_name, container_size, quantity, unit_cost, spacing_inches, notes), services (mulch_cy, soil_amendment_cy, edging_lf, bed_prep_sqft), total_plants.`
                 }, {
                   role: 'user',
                   content: textOnlyContent,
