@@ -1388,20 +1388,38 @@ app.post('/api/design-render', authenticate, async (req, res) => {
     const origW = metadata.width;
     const origH = metadata.height;
 
-    // Build plant description by layer
+    // Build plant description by layer with visual detail
+    const sizeGuide = { back: '4-6 ft tall shrubs', middle: '2-3 ft tall plants', front: '6-12 inch low groundcover' };
     const plantsByLayer = {};
     for (const p of (designPlants || [])) {
       const layer = p.layer || 'middle';
       if (!plantsByLayer[layer]) plantsByLayer[layer] = [];
-      plantsByLayer[layer].push(`${p.quantity || 1}x ${p.common_name || p.plant_name}`);
+      const name = p.common_name || p.plant_name;
+      const size = p.container_size || '';
+      plantsByLayer[layer].push(`${p.quantity || 1}x ${name}${size ? ' (' + size + ')' : ''}`);
     }
     const plantDesc = Object.entries(plantsByLayer)
-      .map(([layer, plants]) => `${layer.toUpperCase()} ROW: ${plants.join(', ')}`)
+      .map(([layer, plants]) => {
+        const guide = sizeGuide[layer] || '';
+        return `${layer.toUpperCase()} ROW (${guide}): ${plants.join(', ')}`;
+      })
       .join('. ');
 
     console.log('[design-render] Plant description:', plantDesc);
 
-    const designPrompt = `Professional landscape installation photograph. In the landscape bed areas of this residential property, install these plants: ${plantDesc}. Style: ${designStyle || 'naturalistic'}. Fresh aged hardwood mulch (dark brown, natural texture) fills all bed space between plants with clean steel edging borders. Each plant is at realistic mature size with natural leaf detail and shadow casting. Preserve the house, driveway, lawn, sky, and all existing features exactly as they are. Shot on Canon EOS R5, 35mm lens, f/8, golden hour natural light.`;
+    const designPrompt = `STRICT RULES — READ BEFORE GENERATING:
+1. DO NOT ALTER THE HOUSE. Every architectural detail — windows, doors, brick pattern, siding, roofline, gutters, trim — must remain pixel-perfect identical to the input photo. Zero modifications to any structure.
+2. DO NOT ALTER the driveway, walkways, vehicles, lawn shape, sky, trees in the background, or anything outside the landscape bed area.
+3. ONLY ADD PLANTS inside the existing mulch/bed area along the house foundation.
+
+PLANT INSTALLATION — ${designStyle || 'naturalistic'} style:
+${plantDesc}
+
+Back row plants go against the house wall — these are SHRUBS (rounded, bushy, 4-6ft), NOT trees. Middle row plants fill the center of the bed. Front row plants line the bed edge as low groundcover or border.
+
+Fill all bare soil between plants with fresh dark brown hardwood mulch. Clean steel edging defines the bed border.
+
+This must look like a real photograph taken after a professional landscape installation — natural lighting, real leaf textures, correct shadows. Do NOT make it look illustrated or AI-generated.`;
 
     console.log('[design-render] Calling Gemini gemini-2.5-flash-image...');
     const resizedBuffer = await sharp(photoBuffer)
