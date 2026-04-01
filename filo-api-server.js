@@ -227,6 +227,7 @@ app.use(cors({
     'https://app.myfilocrm.com',
     'https://myfilocrm.com',
     'https://filo-app-five.vercel.app',
+    'https://filo-app-estephchristisons-projects.vercel.app',
     'http://localhost:3000',
     'http://localhost:5173',
   ],
