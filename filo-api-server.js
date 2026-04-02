@@ -1989,7 +1989,9 @@ app.post('/api/design-night-mode', authenticate, async (req, res) => {
       const b64 = renderDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
       imgBuffer = Buffer.from(b64, 'base64');
     } else {
-      return res.status(400).json({ error: 'renderDataUrl must be a data URL' });
+      const resp = await fetch(renderDataUrl);
+      if (!resp.ok) throw new Error(`Failed to download render: ${resp.status}`);
+      imgBuffer = Buffer.from(await resp.arrayBuffer());
     }
 
     const metadata = await sharp(imgBuffer).metadata();
@@ -2086,7 +2088,9 @@ app.post('/api/design-hardscape', authenticate, async (req, res) => {
       const b64 = renderDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
       imgBuffer = Buffer.from(b64, 'base64');
     } else {
-      return res.status(400).json({ error: 'renderDataUrl must be a data URL' });
+      const resp = await fetch(renderDataUrl);
+      if (!resp.ok) throw new Error(`Failed to download render: ${resp.status}`);
+      imgBuffer = Buffer.from(await resp.arrayBuffer());
     }
 
     const metadata = await sharp(imgBuffer).metadata();
