@@ -919,6 +919,109 @@ app.delete('/api/clients/:id', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+// ── Client Import (file upload → GPT-4o parse → bulk insert) ──
+app.post('/api/clients/import', authenticate, requireAdmin, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    if (!openaiClient) return res.status(503).json({ error: 'AI service not configured' });
+
+    const fileContent = req.file.buffer.toString('utf-8').substring(0, 15000);
+    const fileName = req.file.originalname;
+    const mimeType = req.file.mimetype;
+
+    console.log(`[clients/import] Parsing "${fileName}" (${mimeType}, ${req.file.size} bytes) for company ${req.user.companyId}`);
+
+    const aiResponse = await openaiClient.chat.completions.create({
+      model: config.openai.model,
+      messages: [
+        {
+          role: 'system',
+          content: `You are an expert at parsing client/customer lists for a landscape company. These come in many formats — spreadsheets, CSVs, CRM exports, handwritten lists, etc. Extract structured client data from the provided content.
+
+For each client found, return a JSON object with:
+{
+  "first_name": "string or null",
+  "last_name": "string or null",
+  "company_name": "string or null",
+  "email": "string or null",
+  "phone": "string or null",
+  "address_line1": "string or null",
+  "city": "string or null",
+  "state": "string or null",
+  "zip": "string or null",
+  "notes": "any additional info or null"
+}
+
+Return: { "clients": [...], "warnings": ["any issues"] }
+Be thorough. Real client lists have inconsistent formatting, missing fields, and mixed layouts.`
+        },
+        {
+          role: 'user',
+          content: `Parse this client list (format: ${mimeType}, filename: ${fileName}). Extract all client data into structured JSON.\n\nContent:\n${fileContent}`
+        }
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 4000,
+      temperature: 0.1,
+    });
+
+    const parsed = JSON.parse(aiResponse.choices[0].message.content);
+    const clientsList = parsed.clients || [];
+
+    if (clientsList.length === 0) {
+      return res.json({ message: 'No clients found in file', imported: 0, warnings: parsed.warnings || [] });
+    }
+
+    let imported = 0;
+    const errors = [];
+    for (const c of clientsList) {
+      try {
+        const firstName = c.first_name ? stripHtml(c.first_name.trim()) : null;
+        const lastName = c.last_name ? stripHtml(c.last_name.trim()) : null;
+        const companyName = c.company_name ? stripHtml(c.company_name.trim()) : null;
+        const email = c.email ? c.email.trim().toLowerCase() : null;
+        const phone = c.phone || null;
+        const addressLine1 = c.address_line1 ? stripHtml(c.address_line1) : null;
+        const city = c.city ? stripHtml(c.city) : null;
+        const state = c.state ? stripHtml(c.state) : null;
+        const zip = c.zip || null;
+        const notes = c.notes ? stripHtml(c.notes) : null;
+
+        let displayName;
+        if (firstName && lastName) displayName = `${firstName} ${lastName}`;
+        else if (firstName) displayName = firstName;
+        else if (lastName) displayName = lastName;
+        else if (companyName) displayName = companyName;
+        else if (email) displayName = email;
+        else displayName = 'Unnamed Client';
+
+        await db.getOne(
+          `INSERT INTO clients (company_id, display_name, first_name, last_name, email, phone, address_line1, city, state, zip, notes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+          [req.user.companyId, displayName, firstName, lastName, email, phone, addressLine1, city, state, zip, notes]
+        );
+        imported++;
+      } catch (insertErr) {
+        errors.push(`${c.first_name || c.last_name || 'Unknown'}: ${insertErr.message}`);
+      }
+    }
+
+    console.log(`[clients/import] Imported ${imported}/${clientsList.length} clients for company ${req.user.companyId}`);
+
+    await logActivity(req.user.companyId, req.user.userId, 'client', null, 'import', `Imported ${imported} clients from ${fileName}`);
+
+    res.json({
+      message: `Successfully imported ${imported} clients`,
+      imported,
+      total: clientsList.length,
+      warnings: [...(parsed.warnings || []), ...errors],
+    });
+  } catch (err) {
+    console.error('[clients/import] Error:', err.message);
+    res.status(500).json({ error: `Import failed: ${err.message}` });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════
 // PROJECT ROUTES
 // ═══════════════════════════════════════════════════════════════════
