@@ -1595,7 +1595,17 @@ app.post('/api/design-render', authenticate, async (req, res) => {
       })
       .join('\n\n');
 
+    // Build per-species count summary for strict quantity enforcement
+    const speciesCounts = {};
+    for (const p of (designPlants || [])) {
+      const name = p.common_name || p.plant_name || 'Unknown';
+      speciesCounts[name] = (speciesCounts[name] || 0) + (p.quantity || 1);
+    }
+    const totalPlantCount = Object.values(speciesCounts).reduce((s, n) => s + n, 0);
+    const speciesCountList = Object.entries(speciesCounts).map(([name, qty]) => `  - ${name}: EXACTLY ${qty}`).join('\n');
+
     console.log('[design-render] Plant description:', plantDesc);
+    console.log('[design-render] Total plants:', totalPlantCount, '| Species counts:', JSON.stringify(speciesCounts));
 
     // Build kept plants description for prompt
     const keptPlantsDesc = (keptPlants && keptPlants.length > 0)
@@ -1614,13 +1624,18 @@ ${isRemovalPreview ? `Some plants were previously removed from this bed — that
 YOUR TASK: Add ONLY the following new plants into the existing mulch bed:
 ${plantDesc}
 
+⚠️ EXACT PLANT COUNT — ${totalPlantCount} TOTAL PLANTS:
+${speciesCountList}
+You MUST render EXACTLY this many individual plants for each species. Count them as you place them. Do NOT add extra plants beyond what is listed. Do NOT render fewer than listed. The visual count must match the numbers above PRECISELY.
+
 RULES:
 1. Everything in this photo that is NOT the mulch bed must stay IDENTICAL — house, brick, windows, siding, driveway, lawn, sky, existing trees/shrubs.${keptPlantsDesc ? '\n2. These existing plants must remain unchanged: ' + keptPlantsDesc.replace(/\n- /g, ', ').replace(/^- /, '') : ''}
-${removedPlantsDesc ? `3. Do NOT add back any ${removedPlantsDesc}. Those were removed on purpose. They should NOT appear in the final image.\n` : ''}4. Only add the EXACT plants listed above. No other species.
+${removedPlantsDesc ? `3. Do NOT add back any ${removedPlantsDesc}. Those were removed on purpose. They should NOT appear in the final image.\n` : ''}4. Only add the EXACT plants listed above. No other species. No extra plants.
 5. New plants should be sized appropriately for their species — compact nursery stock, not overgrown mature specimens.
 6. Show every plant in FULL BLOOM with flowers at peak season — EXCEPT non-flowering plants. Asiatic Jasmine (Trachelospermum asiaticum) is a dense, dark-green, non-flowering groundcover — do NOT render white flowers on it. Do NOT confuse it with Star Jasmine.
 7. Space plants with mulch visible between them.
-8. Result must look like a real photograph — natural lighting, real textures, correct shadows.`;
+8. Result must look like a real photograph — natural lighting, real textures, correct shadows.
+9. QUANTITY CHECK: Before finalizing, verify you placed exactly ${totalPlantCount} total plants. Each species count must match the list above.`;
 
     console.log('[design-render] Calling Gemini gemini-2.5-flash-image...');
     const resizedBuffer = await sharp(photoBuffer)
