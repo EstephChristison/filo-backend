@@ -2400,16 +2400,16 @@ app.post('/api/upload/presign', authenticate, async (req, res) => {
 
 app.get('/api/plants', authenticate, async (req, res) => {
   try {
-    const { search, category, sun, page = 1, limit = 100 } = req.query;
-    let query = 'SELECT * FROM plant_library WHERE (company_id = $1 OR is_global = true) AND is_available = true';
+    const { search, category, sun, page = 1, limit = 1000 } = req.query;
+    let query = 'SELECT * FROM plant_library WHERE company_id = $1';
     const params = [req.user.companyId];
 
     if (search) { params.push(`%${search}%`); query += ` AND (common_name ILIKE $${params.length} OR botanical_name ILIKE $${params.length})`; }
     if (category) { params.push(category); query += ` AND category = $${params.length}`; }
     if (sun) { params.push(sun); query += ` AND sun_requirement = $${params.length}`; }
 
-    query += ` ORDER BY sort_order, common_name LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-    params.push(limit, (page - 1) * limit);
+    query += ` ORDER BY common_name LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
 
     const plants = await db.getMany(query, params);
     res.json({ plants });
@@ -2422,11 +2422,12 @@ app.get('/api/plants', authenticate, async (req, res) => {
 app.post('/api/plants', authenticate, requireAdmin, async (req, res) => {
   try {
     const p = req.body;
-    if (!p.commonName) return res.status(400).json({ error: 'commonName is required' });
+    const name = p.common_name || p.commonName;
+    if (!name) return res.status(400).json({ error: 'common_name is required' });
     const plant = await db.getOne(
-      `INSERT INTO plant_library (company_id, common_name, botanical_name, category, container_size, mature_height, mature_width, sun_requirement, water_needs, bloom_color, bloom_season, foliage_color, image_url, description, poetic_description, retail_price, wholesale_price, tags, is_native)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
-      [req.user.companyId, p.commonName, p.botanicalName, p.category, p.containerSize, p.matureHeight, p.matureWidth, p.sunRequirement, p.waterNeeds, p.bloomColor, p.bloomSeason, p.foliageColor, p.imageUrl, p.description, p.poeticDescription, p.retailPrice, p.wholesalePrice, p.tags, p.isNative]
+      `INSERT INTO plant_library (company_id, common_name, botanical_name, category, container_size, sun_requirement, water_needs, retail_price, wholesale_price, is_native, description)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [req.user.companyId, stripHtml(name), p.botanical_name || p.botanicalName || null, p.category || null, p.container_size || p.containerSize || null, p.sun_requirement || p.sunRequirement || null, p.water_needs || p.waterNeeds || null, p.retail_price || p.retailPrice || null, p.wholesale_price || p.wholesalePrice || null, p.is_native || p.isNative || false, p.description || p.notes || null]
     );
     res.status(201).json(plant);
   } catch (err) {
