@@ -1506,13 +1506,8 @@ ${hasMask ? `1. The black area in the mask is the EXACT bed boundary the user dr
     const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
     console.log('[bed-edge] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
+    // Reuse scale/scaledW/scaledH/offsetX/offsetY from letterbox calc above
     const resultMeta = await sharp(resultBuffer).metadata();
-    const scale = Math.min(1024 / origW, 1024 / origH);
-    const scaledW = Math.round(origW * scale);
-    const scaledH = Math.round(origH * scale);
-    const offsetX = Math.round((1024 - scaledW) / 2);
-    const offsetY = Math.round((1024 - scaledH) / 2);
-
     const croppedBuffer = await sharp(resultBuffer)
       .extract({ left: offsetX, top: offsetY, width: Math.min(scaledW, resultMeta.width - offsetX), height: Math.min(scaledH, resultMeta.height - offsetY) })
       .resize(origW, origH, { fit: 'fill' })
