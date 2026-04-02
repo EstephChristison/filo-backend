@@ -1927,6 +1927,242 @@ STRICT RULES:
   }
 });
 
+// ─── Night Mode (Gemini — convert daytime design to nighttime with landscape lighting) ──
+app.post('/api/design-night-mode', authenticate, async (req, res) => {
+  try {
+    const { renderDataUrl } = req.body;
+    if (!renderDataUrl) return res.status(400).json({ error: 'renderDataUrl is required' });
+    if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
+
+    console.log('[night-mode] Converting design to nighttime with landscape lighting...');
+
+    let imgBuffer;
+    if (renderDataUrl.startsWith('data:')) {
+      const b64 = renderDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
+      imgBuffer = Buffer.from(b64, 'base64');
+    } else {
+      return res.status(400).json({ error: 'renderDataUrl must be a data URL' });
+    }
+
+    const metadata = await sharp(imgBuffer).metadata();
+    const origW = metadata.width;
+    const origH = metadata.height;
+
+    const resizedBuffer = await sharp(imgBuffer)
+      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+
+    const nightPrompt = `Convert this daytime landscape photo to a NIGHTTIME scene with professional landscape lighting. This is a landscape design visualization — the goal is to show the client what their property will look like at night with installed lighting.
+
+LIGHTING REQUIREMENTS:
+1. UP-LIGHTS: Place warm white (2700K-3000K) up-lights at the base of specimen trees, large shrubs, and architectural features. The light should wash upward, illuminating trunks and canopy undersides with a warm glow.
+2. PATH LIGHTS: Add low bollard-style or mushroom path lights along walkways, driveways, and bed edges. Spaced 6-8 feet apart, casting soft warm pools of light on the ground.
+3. ACCENT LIGHTS: Highlight focal plants, textured walls, and hardscape features with directed spot lighting.
+4. DOWN-LIGHTS: If large trees exist, add moonlight-style down-lights in canopy, casting dappled shadows below.
+5. WASH LIGHTS: Subtle wall wash lighting on the house facade, especially near the landscape beds.
+
+SCENE REQUIREMENTS:
+- Sky should be dark blue/navy (dusk or early evening) — NOT pitch black
+- Ambient moonlight provides soft fill so the overall scene is visible
+- Shadows are deep but not pure black
+- Plant foliage catches warm light on facing surfaces, cooler ambient on backs
+- Ground surfaces (mulch, gravel, pavers) show warm light pools from path lights
+- The house should have warm interior light visible through windows
+- Stars optional but adds realism
+
+CRITICAL: Every plant, structure, and hardscape element must remain IDENTICAL to the input — same position, size, species. You are ONLY changing the lighting and time of day. Do NOT add, remove, or modify any landscape elements.
+
+The result must look like a professional landscape lighting design rendering — realistic, warm, inviting.`;
+
+    let response;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        response = await googleAI.models.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: [{
+            role: 'user',
+            parts: [
+              { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
+              { text: nightPrompt },
+            ],
+          }],
+          config: { responseModalities: ['image', 'text'] },
+        });
+        break;
+      } catch (geminiErr) {
+        console.warn(`[night-mode] Gemini attempt ${attempt} failed:`, geminiErr.message);
+        if (attempt === 2) throw geminiErr;
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    const imagePart = parts.find(p => p.inlineData);
+    if (!imagePart?.inlineData?.data) {
+      const textPart = parts.find(p => p.text);
+      throw new Error(textPart?.text || 'Gemini returned no image data');
+    }
+
+    const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
+    console.log('[night-mode] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
+
+    const finalBuffer = await sharp(resultBuffer)
+      .resize(origW, origH, { fit: 'fill' })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+
+    const resultDataUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
+    console.log('[night-mode] Complete:', Math.round(finalBuffer.length / 1024), 'KB');
+    res.json({ renderUrl: resultDataUrl });
+  } catch (err) {
+    console.error('[night-mode] Error:', err.message);
+    res.status(500).json({ error: `Night mode failed: ${err.message}` });
+  }
+});
+
+// ─── Hardscape (Gemini — apply hardscape changes to drawn areas) ──
+app.post('/api/design-hardscape', authenticate, async (req, res) => {
+  try {
+    const { renderDataUrl, maskDataUrl, prompt } = req.body;
+    if (!renderDataUrl) return res.status(400).json({ error: 'renderDataUrl is required' });
+    if (!maskDataUrl) return res.status(400).json({ error: 'Draw on the design to mark the hardscape area' });
+    if (!prompt || !prompt.trim()) return res.status(400).json({ error: 'Describe the hardscape change you want' });
+    if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
+
+    const safePrompt = stripHtml(prompt.trim());
+    console.log('[hardscape] Applying hardscape: "%s"', safePrompt);
+
+    let imgBuffer;
+    if (renderDataUrl.startsWith('data:')) {
+      const b64 = renderDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
+      imgBuffer = Buffer.from(b64, 'base64');
+    } else {
+      return res.status(400).json({ error: 'renderDataUrl must be a data URL' });
+    }
+
+    const metadata = await sharp(imgBuffer).metadata();
+    const origW = metadata.width;
+    const origH = metadata.height;
+
+    const resizedBuffer = await sharp(imgBuffer)
+      .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+
+    // Process the mask
+    const maskB64 = maskDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
+    const rawMask = Buffer.from(maskB64, 'base64');
+    const maskResized = await sharp(rawMask)
+      .resize(1024, 1024, { fit: 'fill' })
+      .png()
+      .toBuffer();
+
+    const hardscapePrompt = `You are a landscape designer applying a HARDSCAPE modification to this property design.
+
+Here is the current landscape design:
+The BLACK areas in the mask show EXACTLY where the client wants hardscape changes applied. WHITE areas must remain COMPLETELY UNCHANGED.
+
+HARDSCAPE CHANGE REQUESTED: ${safePrompt}
+
+RULES:
+1. ONLY modify the areas marked BLACK in the mask. Everything in WHITE areas must remain PIXEL-IDENTICAL.
+2. Apply the requested hardscape material/feature realistically within the marked area.
+3. The hardscape must look professionally installed — correct perspective, natural shadows, proper texture and material grain.
+4. Maintain realistic transitions between the new hardscape and surrounding surfaces.
+5. Do NOT move, remove, or alter any plants, structures, or features outside the masked area.
+6. The result must look like a real photograph with natural lighting and correct shadows for the new material.
+7. Common hardscape materials: flagstone, pavers, natural stone, decomposed granite, concrete, brick, gravel, river rock, steel edging, stone borders, retaining walls, stepping stones.`;
+
+    let response;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        response = await googleAI.models.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: [{
+            role: 'user',
+            parts: [
+              { text: 'Here is the current landscape design:' },
+              { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
+              { text: 'Here is the mask. BLACK areas = where to apply the hardscape change. WHITE areas = do not touch.' },
+              { inlineData: { mimeType: 'image/png', data: maskResized.toString('base64') } },
+              { text: hardscapePrompt },
+            ],
+          }],
+          config: { responseModalities: ['image', 'text'] },
+        });
+        break;
+      } catch (geminiErr) {
+        console.warn(`[hardscape] Gemini attempt ${attempt} failed:`, geminiErr.message);
+        if (attempt === 2) throw geminiErr;
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    const imagePart = parts.find(p => p.inlineData);
+    if (!imagePart?.inlineData?.data) {
+      const textPart = parts.find(p => p.text);
+      throw new Error(textPart?.text || 'Gemini returned no image data');
+    }
+
+    const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
+    console.log('[hardscape] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
+
+    const finalBuffer = await sharp(resultBuffer)
+      .resize(origW, origH, { fit: 'fill' })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+
+    const resultDataUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
+    console.log('[hardscape] Complete:', Math.round(finalBuffer.length / 1024), 'KB');
+    res.json({ renderUrl: resultDataUrl });
+  } catch (err) {
+    console.error('[hardscape] Error:', err.message);
+    res.status(500).json({ error: `Hardscape edit failed: ${err.message}` });
+  }
+});
+
+// ─── Saved Prompts (user-created reusable design prompts) ──
+app.get('/api/saved-prompts', authenticate, async (req, res) => {
+  try {
+    const prompts = await db.getMany(
+      'SELECT * FROM saved_prompts WHERE company_id = $1 ORDER BY created_at DESC',
+      [req.user.companyId]
+    );
+    res.json({ prompts });
+  } catch (err) {
+    console.error('[saved-prompts] GET error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch saved prompts' });
+  }
+});
+
+app.post('/api/saved-prompts', authenticate, async (req, res) => {
+  try {
+    const { name, prompt } = req.body;
+    if (!name || !prompt) return res.status(400).json({ error: 'name and prompt are required' });
+    const savedPrompt = await db.getOne(
+      'INSERT INTO saved_prompts (company_id, user_id, name, prompt) VALUES ($1, $2, $3, $4) RETURNING *',
+      [req.user.companyId, req.user.userId, stripHtml(name.trim()), stripHtml(prompt.trim())]
+    );
+    res.status(201).json(savedPrompt);
+  } catch (err) {
+    console.error('[saved-prompts] POST error:', err.message);
+    res.status(500).json({ error: 'Failed to save prompt' });
+  }
+});
+
+app.delete('/api/saved-prompts/:id', authenticate, async (req, res) => {
+  try {
+    const result = await db.query('DELETE FROM saved_prompts WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Prompt not found' });
+    res.json({ message: 'Prompt deleted' });
+  } catch (err) {
+    console.error('[saved-prompts] DELETE error:', err.message);
+    res.status(500).json({ error: 'Failed to delete prompt' });
+  }
+});
+
 // FILE UPLOAD ROUTES
 // ═══════════════════════════════════════════════════════════════════
 
@@ -4049,6 +4285,21 @@ app.listen(config.port, async () => {
   // Ensure Supabase Storage bucket exists on startup
   if (supaStorage) {
     await supaStorage.ensureBucket();
+  }
+
+  // Ensure saved_prompts table exists
+  try {
+    await db.query(`CREATE TABLE IF NOT EXISTS saved_prompts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id UUID NOT NULL,
+      user_id UUID,
+      name VARCHAR(255) NOT NULL,
+      prompt TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    console.log('   saved_prompts table ready');
+  } catch (e) {
+    console.warn('   saved_prompts table check failed:', e.message);
   }
 });
 
