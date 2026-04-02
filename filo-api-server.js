@@ -2046,56 +2046,10 @@ app.post('/api/projects/:projectId/designs/generate', authenticate, requireActiv
           const removePlants = existingPlants.filter(p => p.mark === 'remove').map(getPlantName).join(', ');
           console.log('[design-gen] Existing plants:', existingPlants.length, '| Keep:', keepPlants || '(none)', '| Remove:', removePlants || '(none)');
 
-          // ── PROMPT ENHANCER: Enrich the client's raw plant requests ──
-          let enhancedRequests = project.special_requests || '';
-          if (enhancedRequests.trim()) {
-            try {
-              console.log('[design-gen] Enhancing client request:', enhancedRequests.substring(0, 100));
-              const sunExposureLabel = (project.sun_exposure || 'full_sun').replace(/_/g, ' ');
-              const styleLabel = (project.design_style || 'naturalistic').replace(/_/g, ' ');
-              const zone = company.usda_zone || '9a';
-
-              const enhanceRes = await openaiClient.chat.completions.create({
-                model: config.openai.model,
-                temperature: 0.4,
-                max_tokens: 800,
-                messages: [
-                  {
-                    role: 'system',
-                    content: `You are an expert landscape designer's internal prompt translator. Your job is to take a homeowner's casual plant/design request and translate it into precise, professional landscape specifications.
-
-CRITICAL RULES:
-- ONLY use the EXACT plants the client mentioned. Do NOT substitute, swap, replace, or suggest alternatives.
-- If the client says "azaleas" — your output MUST reference azaleas. NOT Indian Hawthorn, NOT Loropetalum, NOT any "similar" plant. AZALEAS.
-- If the client says "Esperanza" — use Esperanza (Tecoma stans). Do NOT swap it for anything else.
-- NEVER replace a client's plant choice with a "better suited" or "more appropriate" alternative. The client chose what they want.
-- Expand the client's named plants into specific botanical names, cultivar names, container sizes, and recommended quantities
-- Add professional spacing, mature height/width, and placement guidance for the plants they asked for
-- Factor in the site conditions: USDA Zone ${zone}, ${sunExposureLabel} exposure, ${styleLabel} style
-- If a plant may struggle in these conditions, STILL USE IT but add a brief care note (e.g. "needs afternoon shade protection")
-- NEVER add plants the client did not ask for. Your job is to refine their request, not expand it.
-- Output ONLY the enhanced specification text, no preamble or explanation
-- Be concise — 2-4 sentences max`
-                  },
-                  {
-                    role: 'user',
-                    content: `Client's raw request: "${enhancedRequests}"
-
-Existing plants being kept: ${keepPlants || 'none'}
-Plants being removed: ${removePlants || 'none'}`
-                  }
-                ]
-              });
-
-              const enhanced = enhanceRes.choices[0]?.message?.content?.trim();
-              if (enhanced) {
-                enhancedRequests = enhanced;
-                console.log('[design-gen] Enhanced request:', enhanced.substring(0, 200));
-              }
-            } catch (enhanceErr) {
-              console.warn('[design-gen] Prompt enhancement failed (using raw request):', enhanceErr.message);
-              // Fall through — use the original raw request
-            }
+          // Pass client's raw plant request straight through — no enhancer, no middleman
+          const clientRequests = project.special_requests || '';
+          if (clientRequests.trim()) {
+            console.log('[design-gen] Client request (raw, no enhancer):', clientRequests.substring(0, 200));
           }
 
           // Build user message — include photo if available for context
@@ -2162,8 +2116,8 @@ ${styleGuide[designStyle] || styleGuide.naturalistic}
           if (removePlants) {
             userPrompt += `\n⛔ PLANTS BEING RIPPED OUT (these will be physically removed from the property — DO NOT include them or any variety of the same species ANYWHERE in your design):\n${removePlants}\nDesign BETTER REPLACEMENT plants for the gaps left by these removals.\n`;
           }
-          if (enhancedRequests.trim()) {
-            userPrompt += `\nCLIENT DESIGN SPECIFICATIONS (enhanced from client input): ${enhancedRequests}\n`;
+          if (clientRequests.trim()) {
+            userPrompt += `\nCLIENT PLANT REQUESTS (use these EXACT plants, do NOT substitute): ${clientRequests}\n`;
           }
           userPrompt += `\nAVAILABLE NURSERY INVENTORY:\n${plantNames || '(No inventory loaded — suggest the best plants you know work in this exact zone and microclimate based on your 50 years of local experience)'}`;
 
@@ -2181,11 +2135,12 @@ RULE #1 — CLIENT PLANT REQUESTS ARE SACRED:
 If the client specifies plants, you MUST include ALL of them. Do NOT substitute, swap, or replace any with alternatives. If they say "azaleas" — use AZALEAS, not Indian Hawthorn. If the species count allows more plants than the client named, YOU choose the extras to complement their picks. If the client named MORE plants than the species limit, include all of them anyway (client requests override the species count). Place plants in the appropriate layers by mature height, and adjust quantities to fill the bed.
 
 RULE #2 — SPECIES COUNT (STRICTLY ENFORCED):
-The client has requested EXACTLY ${maxSpecies} different plant species. Before you output JSON, COUNT your unique species names. If your count ≠ ${maxSpecies}, FIX IT. This is non-negotiable.${maxSpecies === 1 ? ' Use ONLY ONE plant species. The same plant in every layer. Nothing else.' : ` Use exactly ${maxSpecies} unique plant names total. The same species in different layers counts as 1 species.`} When the client does not specify which plants, choose plants yourself for 3 professional layers:
+You MUST use EXACTLY ${maxSpecies} different plant species. Before you output JSON, list every unique common_name you used and COUNT them. If the count is not ${maxSpecies}, add or remove species until it is. This is the #1 most important rule after Rule #1.${maxSpecies === 1 ? ' Use ONLY ONE plant species across all layers.' : ` You need ${maxSpecies} unique plant names spread across the layers. A species in multiple layers still counts as 1.`}
+Distribute the ${maxSpecies} species across 3 layers by mature height:
   • BACK ROW (against structure): Tall evergreen shrubs 5-8ft mature (3-5 gal)
-  • MIDDLE ROW (color & texture): Medium shrubs 3-5ft mature (1-3 gal)
+  • MIDDLE ROW (color & texture): Medium flowering shrubs 3-5ft mature (1-3 gal)
   • FRONT ROW (border/groundcover): Low plants under 2ft (1 gal / 4" pots)
-Use odd-number groupings (3, 5, 7). Repeat varieties for rhythm.
+Each species MUST have a quantity ≥ 1. Use odd-number groupings (3, 5, 7). Every species must have real quantities that fill the bed — do NOT leave any species with 0 quantity.
 
 RULE #3 — REMOVAL AND KEPT PLANTS:
 - If the client said to REMOVE a plant, do NOT include it or any variety of that species.
@@ -2219,7 +2174,7 @@ Return ONLY valid JSON with this exact structure:
             }],
             temperature: 0.3,
             response_format: { type: 'json_object' },
-            max_tokens: 4000,
+            max_tokens: 8000,
           });
 
           const rawContent = aiResponse.choices[0].message.content;
