@@ -1591,7 +1591,7 @@ RULES:
 1. Everything in this photo that is NOT the mulch bed must stay IDENTICAL — house, brick, windows, siding, driveway, lawn, sky, existing trees/shrubs.${keptPlantsDesc ? '\n2. These existing plants must remain unchanged: ' + keptPlantsDesc.replace(/\n- /g, ', ').replace(/^- /, '') : ''}
 ${removedPlantsDesc ? `3. Do NOT add back any ${removedPlantsDesc}. Those were removed on purpose. They should NOT appear in the final image.\n` : ''}4. Only add the EXACT plants listed above. No other species.
 5. New plants should be sized appropriately for their species — compact nursery stock, not overgrown mature specimens.
-6. Show every plant in FULL BLOOM with flowers at peak season.
+6. Show every plant in FULL BLOOM with flowers at peak season — EXCEPT non-flowering plants. Asiatic Jasmine (Trachelospermum asiaticum) is a dense, dark-green, non-flowering groundcover — do NOT render white flowers on it. Do NOT confuse it with Star Jasmine.
 7. Space plants with mulch visible between them.
 8. Result must look like a real photograph — natural lighting, real textures, correct shadows.`;
 
@@ -2288,6 +2288,9 @@ GENERAL GUIDELINES:
 - Include steel edging (typically 40-80 LF) and 3-4" hardwood mulch over weed barrier
 - Use real wholesale nursery pricing ($8-15 for 1-gal, $22-38 for 3-gal, $35-55 for 5-gal, $120-180 for 15-gal trees)
 - Your design must ONLY contain NEW plants being installed (plus notes about what's staying).
+
+BOTANICAL KNOWLEDGE (use this to avoid mistakes):
+- Asiatic Jasmine (Trachelospermum asiaticum) is a LOW GROUNDCOVER with NO flowers — it does NOT produce white flowers. Do NOT confuse it with Star Jasmine (Trachelospermum jasminoides) which DOES have white fragrant flowers. If the client requests Asiatic Jasmine, describe it accurately as a dense, dark-green, non-flowering evergreen groundcover.
 
 Return ONLY valid JSON with this exact structure:
 {
