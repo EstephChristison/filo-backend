@@ -965,10 +965,14 @@ app.post('/api/projects', authenticate, requireActiveSubscription, async (req, r
     const DESIGN_STYLE_MAP = {
       'formal': 'formal', 'formal / symmetrical': 'formal', 'formal_symmetrical': 'formal',
       'naturalistic': 'naturalistic', 'naturalistic / cottage': 'naturalistic', 'naturalistic_cottage': 'naturalistic',
-      'modern': 'modern', 'modern / minimalist': 'modern', 'modern_minimalist': 'modern',
+      'modern': 'modern', 'modern / minimalist': 'modern', 'modern_minimalist': 'modern', 'contemporary': 'modern',
       'tropical': 'tropical',
       'xeriscape': 'xeriscape', 'desert / xeriscape': 'xeriscape', 'desert_xeriscape': 'xeriscape',
-      'contemporary': 'modern',
+      'mediterranean': 'mediterranean',
+      'cottage': 'cottage', 'cottage garden': 'cottage',
+      'desert': 'desert', 'southwest': 'desert', 'desert / southwest': 'desert',
+      'farmhouse': 'farmhouse', 'rustic': 'farmhouse', 'farmhouse / rustic': 'farmhouse',
+      'transitional': 'transitional',
     };
     const SUN_EXPOSURE_MAP = {
       'full_sun': 'full_sun', 'full sun': 'full_sun',
@@ -1045,9 +1049,14 @@ app.put('/api/projects/:id', authenticate, async (req, res) => {
     const DESIGN_STYLE_MAP = {
       'formal': 'formal', 'formal / symmetrical': 'formal', 'formal_symmetrical': 'formal',
       'naturalistic': 'naturalistic', 'naturalistic / cottage': 'naturalistic', 'naturalistic_cottage': 'naturalistic',
-      'modern': 'modern', 'modern / minimalist': 'modern', 'modern_minimalist': 'modern',
+      'modern': 'modern', 'modern / minimalist': 'modern', 'modern_minimalist': 'modern', 'contemporary': 'modern',
       'tropical': 'tropical',
       'xeriscape': 'xeriscape', 'desert / xeriscape': 'xeriscape', 'desert_xeriscape': 'xeriscape',
+      'mediterranean': 'mediterranean',
+      'cottage': 'cottage', 'cottage garden': 'cottage',
+      'desert': 'desert', 'southwest': 'desert', 'desert / southwest': 'desert',
+      'farmhouse': 'farmhouse', 'rustic': 'farmhouse', 'farmhouse / rustic': 'farmhouse',
+      'transitional': 'transitional',
     };
     const SUN_EXPOSURE_MAP = {
       'full_sun': 'full_sun', 'full sun': 'full_sun',
@@ -2249,13 +2258,27 @@ app.post('/api/projects/:projectId/designs/generate', authenticate, requireActiv
             full_shade: 'This bed gets less than 3 hours of direct sun. Choose shade-tolerant plants only. Ferns, Cast Iron Plant, Aspidistra, Holly Fern, Caladium for color.',
           };
 
-          // Build style-specific guidance
+          // Build style-specific guidance — production-grade design system prompts
           const styleGuide = {
-            formal: 'FORMAL/SYMMETRICAL style — mirror plant placement left-to-right, geometric spacing, clean lines. Monochromatic or limited color palette.',
-            naturalistic: 'NATURALISTIC/COTTAGE style — flowing curves, mixed textures, layered heights that look organic. Relaxed but intentional.',
-            modern: 'MODERN/MINIMALIST style — clean architectural lines, limited species, bold single-species masses. Negative space is part of the design.',
-            tropical: 'TROPICAL style — lush, dense, layered foliage with bold leaf textures. Year-round green density is the goal.',
-            xeriscape: 'XERISCAPE/DROUGHT-TOLERANT style — native and adapted plants that need minimal irrigation once established.',
+            formal: `FORMAL LANDSCAPE — Strict symmetry, axial alignment, geometric precision. Layout organized around a dominant central axis with mirrored elements on both sides. Plantings consist of tightly clipped hedges (boxwood, yaupon holly) forming defined borders and compartments. Incorporate topiary and evenly spaced ornamental trees with uniform canopy shaping. Flower beds are minimal and controlled — repeating patterns, limited color palette (white, lavender, seasonal annuals). No randomness — every plant placed intentionally and evenly spaced. Edges crisp and perfectly maintained. Mood: disciplined, timeless, authoritative.`,
+
+            naturalistic: `NATURALISTIC LANDSCAPE — Organic, ecologically inspired, asymmetrical composition with soft transitions. Avoid rigid geometry — use flowing, curved lines. Plants arranged in layered groupings: canopy trees, understory shrubs, ornamental grasses, groundcover. Cluster plants in drifts rather than even spacing — natural rhythm and density variation. Include seasonal diversity with staggered bloom times, texture variation, and movement in wind. Incorporate pollinator-friendly and habitat-supporting species. Edges between lawn, beds, and pathways are soft and blended. Mood: immersive, relaxed, authentic — a curated extension of nature.`,
+
+            modern: `MODERN/CONTEMPORARY LANDSCAPE — Minimalist, clean lines, strong geometry, intentional negative space. Structured but not symmetrical — rectangles, linear paths, sharp angles to define zones. Plantings are sparse and highly intentional — sculptural species (agave, yucca, boxwood spheres, bamboo, ornamental grasses) treated as architectural elements, not mass plantings. Color palette restrained: gray, black, white, deep green with occasional sparse accents. Lawn minimal or eliminated — open space is a key design element. Mood: sharp, controlled, sophisticated — precision and high-end design.`,
+
+            tropical: `TROPICAL LANDSCAPE — Dense, lush, resort-like environment with layered vegetation and immersive coverage. Plant palette includes palms, banana trees, bird of paradise, hibiscus, elephant ears, ferns, and broadleaf tropicals. Vegetation layered vertically: tall canopy palms, mid-level shrubs, dense groundcover. Tight spacing with overlapping foliage — full, abundant appearance. Large leaves and contrasting textures dominate. Color palette vibrant and saturated: deep greens with bright blooms in reds, oranges, yellows. Pathways partially concealed by planting. Mood: immersive, vibrant, luxurious — alive, slightly wild, enclosed.`,
+
+            xeriscape: `XERISCAPE LANDSCAPE — Water-efficient, minimal irrigation, long-term sustainability. Ground surfaces dominated by gravel, decomposed granite, or crushed stone in natural tones. Dry riverbeds or drainage swales may be incorporated. Plant palette: drought-tolerant species (agave, yucca, cacti, desert grasses, hardy shrubs) spaced widely so each specimen stands out individually. Boulders, stone clusters, and naturalistic rock formations integrated into design. Color palette earthy and muted: tans, browns, silvers, soft greens. No dense lawn — turf eliminated or extremely limited. Mood: calm, efficient, resilient — environmental awareness and low maintenance.`,
+
+            mediterranean: `MEDITERRANEAN LANDSCAPE — Warm, sun-driven, combining drought tolerance with refined rustic elegance. Open spaces, gravel surfaces, structured but relaxed geometry. Courtyard-style layouts common. Plant palette: olive trees, lavender, rosemary, cypress, and drought-tolerant aromatic plants, spaced to allow airflow and sun exposure. Color palette: warm earth tones — beige, terracotta, soft greens. Hardscape integrates stucco walls, clay pots, terracotta, natural stone, rustic textures. Mood: warm, relaxed, timeless — balance between structure and informality.`,
+
+            cottage: `COTTAGE GARDEN — Dense, informal, abundant flowering with romantic overflowing aesthetic. Layout is loose and asymmetrical with minimal visible structure. Plantings tightly packed and layered: wide variety of flowering perennials, annuals, and shrubs. Plants spill over pathways and edges creating soft, overflowing effect. Color palette diverse and vibrant with mixed blooms in multiple colors. Pathways narrow and winding, often partially covered by plant growth. Hardscape minimal and rustic — wooden elements, vintage-style features. Mood: charming, nostalgic, highly textured — controlled chaos.`,
+
+            desert: `DESERT/SOUTHWEST LANDSCAPE — Arid environment with bold plant forms and minimal water use. Open space, strong shadows, sculptural elements. Ground surfaces: sand, gravel, rock in warm tones. Plant palette: cacti, succulents, agave, desert-adapted shrubs spaced widely. Large boulders and natural rock formations integrated into design. Color palette warm and muted: browns, tans, dusty greens. Lighting enhances contrast and shadow, emphasizing plant shapes. Mood: stark, dramatic, grounded in natural desert aesthetics.`,
+
+            farmhouse: `FARMHOUSE/RUSTIC LANDSCAPE — Simple, functional, blending natural materials with practical layout. Composition is open and unpretentious with focus on usability. Plant palette: hardy shrubs, native grasses, simple flowering plants in loose groupings. Hardscape uses wood, gravel, basic stone. Fencing, raised beds, and functional outdoor spaces are common. Color palette natural and subdued. Mood: practical, relaxed, grounded — balance between function and aesthetic.`,
+
+            transitional: `TRANSITIONAL LANDSCAPE — Balanced blend of traditional structure with modern simplicity. Clean lines with softened edges — avoids extremes of rigidity or informality. Plant palette: structured shrubs combined with looser ornamental grasses and seasonal accents. Hardscape: mix of classic and modern materials, pavers with simplified patterns. Color palette neutral with controlled accents. Versatile and broadly appealing. Mood: clean, approachable, adaptable.`,
           };
 
           const sunExposure = project.sun_exposure || 'full_sun';
