@@ -1457,13 +1457,24 @@ ${hasMask ? '1. Reshape the landscape bed edge to follow the boundary drawn in t
 9. Preserve the overall lighting, shadows, and perspective of the original photo. The result must look like a real photograph.` });
 
     console.log('[bed-edge] Calling Gemini...');
-    const response = await googleAI.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: [{ role: 'user', parts: promptParts }],
-      config: {
-        responseModalities: ['image', 'text'],
-      },
-    });
+    let response;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        response = await googleAI.models.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: [{ role: 'user', parts: promptParts }],
+          config: {
+            responseModalities: ['image', 'text'],
+          },
+        });
+        break;
+      } catch (geminiErr) {
+        console.warn(`[bed-edge] Gemini attempt ${attempt} failed:`, geminiErr.message);
+        if (attempt === 2) throw geminiErr;
+        console.log('[bed-edge] Retrying in 2s...');
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
 
     const parts = response.candidates?.[0]?.content?.parts || [];
     const imagePart = parts.find(p => p.inlineData);
@@ -3096,7 +3107,7 @@ app.get('/api/export/plants/csv', authenticate, async (req, res) => {
 
 const callAI = createAIHandler(db);
 const openaiClient = config.openai.apiKey ? new OpenAI({ apiKey: config.openai.apiKey }) : null;
-const googleAI = process.env.GOOGLE_AI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY }) : null;
+const googleAI = process.env.GOOGLE_AI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY, httpOptions: { timeout: 180_000 } }) : null;
 
 async function callManusAI(taskType, data) {
   // Legacy function name kept for compatibility — routes to direct OpenAI calls
