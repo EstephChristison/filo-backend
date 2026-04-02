@@ -1377,7 +1377,6 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
     const { photoUrl, maskDataUrl, edgeStyle, adjustmentFeet } = req.body;
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
-    if (!maskDataUrl) return res.status(400).json({ error: 'Draw the bed edge first' });
 
     // SSRF protection
     const allowedHosts = [
@@ -1394,7 +1393,8 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
       }
     }
 
-    console.log('[bed-edge] Downloading photo...');
+    const hasMask = maskDataUrl && maskDataUrl.startsWith('data:');
+    console.log('[bed-edge] Downloading photo... hasMask:', hasMask);
     let photoBuffer;
     if (photoUrl.startsWith('data:')) {
       const b64 = photoUrl.replace(/^data:image\/[^;]+;base64,/, '');
@@ -1415,46 +1415,51 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
       .jpeg({ quality: 85 })
       .toBuffer();
 
-    const maskB64 = maskDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
-    const maskResized = await sharp(Buffer.from(maskB64, 'base64'))
-      .resize(1024, 1024, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
-      .png()
-      .toBuffer();
+    let maskResized = null;
+    if (hasMask) {
+      const maskB64 = maskDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
+      maskResized = await sharp(Buffer.from(maskB64, 'base64'))
+        .resize(1024, 1024, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+        .png()
+        .toBuffer();
+    }
 
     const edgeDesc = edgeStyle === 'square'
-      ? 'sharp 90-degree angles and straight geometric lines — like a professionally cut formal bed'
-      : 'smooth flowing curves with natural rounded transitions — like a professionally cut naturalistic bed';
+      ? 'perfectly straight lines and exact 90-degree right angles at every corner. Even if the existing bed has curves, convert ALL curves into straight segments meeting at sharp 90° corners. The bed must look like a rectangle or series of rectangles — no curves, no arcs, no rounded transitions anywhere. Think formal garden geometry.'
+      : 'smooth flowing curves with natural rounded transitions. Follow the natural contour the user drew (or the existing bed shape). Soften any sharp angles into gentle arcs. The edge should flow like a river — organic and graceful.';
 
     const adjustDesc = !adjustmentFeet || adjustmentFeet === 0
-      ? 'Keep the bed boundary exactly where the drawn line indicates.'
+      ? 'Keep the bed at its current size.'
       : adjustmentFeet > 0
-        ? `Expand the bed outward by approximately ${adjustmentFeet} feet beyond the drawn line, pushing into the lawn/grass area. Add fresh mulch to the expanded area.`
-        : `Shrink the bed inward by approximately ${Math.abs(adjustmentFeet)} feet from the drawn line. Replace the shrunk area with matching lawn/grass.`;
+        ? `Expand the bed outward by approximately ${adjustmentFeet} feet beyond the current/drawn edge, pushing into the lawn/grass area. Add fresh mulch to the expanded area.`
+        : `Shrink the bed inward by approximately ${Math.abs(adjustmentFeet)} feet from the current/drawn edge. Replace the shrunk area with matching lawn/grass.`;
 
-    console.log('[bed-edge] Calling Gemini...');
-    const response = await googleAI.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: 'Here is the current property photo:' },
-            { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
-            { text: 'Here is a mask image. The BLACK filled area represents the desired landscape bed area. WHITE areas are outside the bed (lawn, driveway, etc).' },
-            { inlineData: { mimeType: 'image/png', data: maskResized.toString('base64') } },
-            { text: `STRICT BED EDGE RESHAPING RULES:
-1. Reshape the landscape bed edge to follow the boundary of the black mask area.
-2. The bed edge style must be: ${edgeDesc}.
+    // Build prompt parts — with or without mask
+    const promptParts = [
+      { text: 'Here is the current property photo:' },
+      { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
+    ];
+    if (maskResized) {
+      promptParts.push(
+        { text: 'Here is a mask image. The BLACK filled area represents the desired landscape bed area drawn by the user. WHITE areas are outside the bed.' },
+        { inlineData: { mimeType: 'image/png', data: maskResized.toString('base64') } },
+      );
+    }
+    promptParts.push({ text: `STRICT BED EDGE RESHAPING RULES:
+${hasMask ? '1. Reshape the landscape bed edge to follow the boundary drawn in the mask.' : '1. Reshape the EXISTING landscape bed edge visible in the photo.'}
+2. The bed edge style MUST be: ${edgeDesc}
 3. ${adjustDesc}
 4. Inside the bed: maintain existing mulch, soil, plants, and clean bed surface exactly as they are.
 5. Outside the bed: maintain existing lawn, grass, hardscape, or whatever surface is there.
 6. Create a clean, professional steel-edged transition between the bed and the surrounding surface. The edge should look like it was just cut by a professional landscaper — crisp, defined, with a slight trench reveal.
 7. DO NOT modify the house, driveway, sidewalk, fence, trees, or any structure. ONLY reshape the bed-to-lawn boundary.
 8. DO NOT add, remove, or move any plants. The plants stay exactly where they are.
-9. Preserve the overall lighting, shadows, and perspective of the original photo. The result must look like a real photograph.` },
-          ],
-        },
-      ],
+9. Preserve the overall lighting, shadows, and perspective of the original photo. The result must look like a real photograph.` });
+
+    console.log('[bed-edge] Calling Gemini...');
+    const response = await googleAI.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [{ role: 'user', parts: promptParts }],
       config: {
         responseModalities: ['image', 'text'],
       },
