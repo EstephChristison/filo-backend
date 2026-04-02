@@ -2003,27 +2003,30 @@ app.post('/api/design-night-mode', authenticate, async (req, res) => {
       .jpeg({ quality: 85 })
       .toBuffer();
 
-    const nightPrompt = `Convert this daytime landscape photo to a NIGHTTIME scene with professional landscape lighting. This is a landscape design visualization — the goal is to show the client what their property will look like at night with installed lighting.
+    const nightPrompt = `Convert this landscape photo to a TRUE NIGHTTIME scene with professional landscape lighting installed. This is a landscape lighting design visualization — the goal is to show the client what their property looks like AFTER DARK with a professional lighting system.
 
-LIGHTING REQUIREMENTS:
-1. UP-LIGHTS: Place warm white (2700K-3000K) up-lights at the base of specimen trees, large shrubs, and architectural features. The light should wash upward, illuminating trunks and canopy undersides with a warm glow.
-2. PATH LIGHTS: Add low bollard-style or mushroom path lights along walkways, driveways, and bed edges. Spaced 6-8 feet apart, casting soft warm pools of light on the ground.
-3. ACCENT LIGHTS: Highlight focal plants, textured walls, and hardscape features with directed spot lighting.
-4. DOWN-LIGHTS: If large trees exist, add moonlight-style down-lights in canopy, casting dappled shadows below.
-5. WASH LIGHTS: Subtle wall wash lighting on the house facade, especially near the landscape beds.
+CRITICAL TIME OF DAY: The scene MUST be set at NIGHT — fully dark sky. NOT afternoon, NOT golden hour, NOT sunset, NOT dusk with daylight remaining. The sky must be DARK NAVY to BLACK, as it appears 1-2 hours after sunset. The ONLY light sources in the scene should be the installed landscape fixtures, moonlight, and interior house lights. There should be NO sunlight, NO bright ambient daylight, NO warm afternoon glow from the sun.
 
-SCENE REQUIREMENTS:
-- Sky should be dark blue/navy (dusk or early evening) — NOT pitch black
-- Ambient moonlight provides soft fill so the overall scene is visible
-- Shadows are deep but not pure black
-- Plant foliage catches warm light on facing surfaces, cooler ambient on backs
-- Ground surfaces (mulch, gravel, pavers) show warm light pools from path lights
-- The house should have warm interior light visible through windows
-- Stars optional but adds realism
+LIGHTING FIXTURES TO INSTALL:
+1. UP-LIGHTS: Warm white (2700K) bullet-style up-lights at the base of specimen trees, large shrubs, and architectural columns. Light washes upward, illuminating trunks, canopy undersides, and wall textures with a warm amber glow. Visible hot spots where fixtures aim.
+2. PATH LIGHTS: Low copper/brass mushroom or bollard path lights along walkways, driveways, and bed edges. Spaced 6-8 feet apart. Each casts a distinct warm pool of light on the ground surface below it.
+3. ACCENT/SPOT LIGHTS: Directed spots highlighting focal plants, textured brick/stone walls, and hardscape features. Create dramatic light-and-shadow contrast.
+4. DOWN-LIGHTS (MOONLIGHTING): If large trees exist, mount fixtures high in canopy aiming down — creates dappled, natural-looking shadows on the ground below.
+5. WALL WASH: Grazing wash lights on the house facade near landscape beds, emphasizing brick/stone texture with warm light raking across the surface.
 
-CRITICAL: Every plant, structure, and hardscape element must remain IDENTICAL to the input — same position, size, species. You are ONLY changing the lighting and time of day. Do NOT add, remove, or modify any landscape elements.
+NIGHTTIME ATMOSPHERE:
+- Sky: Deep navy to near-black. Stars visible. NO remaining sunlight or bright sky.
+- The overall scene should be DARK — landscape elements not directly lit by fixtures should be barely visible in deep shadow and cool moonlight fill.
+- Strong contrast between warm-lit areas (near fixtures) and dark unlit areas.
+- Plant foliage: warm golden highlights on surfaces facing fixtures, deep cool shadows on opposite sides.
+- Mulch/ground: mostly dark, with distinct warm light pools cast by each path light.
+- House windows: warm interior glow visible through glass.
+- Driveway/walkways: dark except where path lights illuminate.
+- The scene should feel like 9-10 PM on a clear night.
 
-The result must look like a professional landscape lighting design rendering — realistic, warm, inviting.`;
+CRITICAL: Every plant, structure, and hardscape element must remain IDENTICAL to the input — same position, size, species, layout. You are ONLY changing the time of day to nighttime and adding landscape lighting fixtures. Do NOT add, remove, resize, or reposition any landscape elements.
+
+The result must look like a professional landscape lighting design photograph taken at night — dramatic, warm fixtures against a dark sky, showcasing exactly how the installed lighting system transforms the property after dark.`;
 
     let response;
     for (let attempt = 1; attempt <= 2; attempt++) {
