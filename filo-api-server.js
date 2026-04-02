@@ -1475,7 +1475,9 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
         { inlineData: { mimeType: 'image/png', data: maskResized.toString('base64') } },
       );
     }
-    promptParts.push({ text: `STRICT BED EDGE RESHAPING RULES:
+    promptParts.push({ text: `⚠️ THIS IS A BED EDGE RESHAPING TASK ONLY. You are NOT designing a landscape. You are NOT adding plants. You are ONLY reshaping the bed-to-lawn boundary line.
+
+STRICT BED EDGE RESHAPING RULES:
 ${hasMask ? `1. The black area in the mask is the EXACT bed boundary the user drew. The new bed edge MUST follow this boundary PRECISELY — pixel for pixel along the mask edge. Do NOT shrink the bed smaller than the drawn area. Do NOT round off corners that the user drew. The bed must extend ALL THE WAY to where the black mask reaches. If the mask extends into the lawn, the bed must extend into the lawn to match.` : '1. Reshape the EXISTING landscape bed edge visible in the photo.'}
 2. The bed edge style MUST be: ${edgeDesc}
 3. ${adjustDesc}
@@ -1483,7 +1485,7 @@ ${hasMask ? `1. The black area in the mask is the EXACT bed boundary the user dr
 5. EVERYTHING outside the bed boundary: keep existing lawn, grass, hardscape as-is. Any bed area that is now outside the new boundary should become lawn/grass.
 6. The edge transition must be a clean, crisp, professionally cut steel-edge line — sharp and defined with a slight trench reveal. No gradual fade, no soft blending.
 7. DO NOT modify the house, driveway, sidewalk, fence, trees, or any structure. ONLY reshape the bed-to-lawn boundary.
-8. DO NOT add, remove, or move any plants. Plants stay exactly where they are.
+8. ⛔ ZERO PLANT CHANGES — Do NOT add ANY new plants. Do NOT remove ANY existing plants. Do NOT move, resize, recolor, or alter ANY vegetation. Every plant, shrub, tree, and blade of grass must remain PIXEL-IDENTICAL to the input photo. The ONLY change is the bed edge shape.
 9. The result must look like a real photograph with natural lighting and shadows.` });
 
     console.log('[bed-edge] Calling Gemini...');
