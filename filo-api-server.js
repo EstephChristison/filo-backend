@@ -2500,31 +2500,146 @@ app.delete('/api/plants/:id', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+// ─── CSV Parser Helper ───────────────────────────────────────────
+function parseCSVLine(line) {
+  const result = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
+      else if (ch === '"') { inQuotes = false; }
+      else { current += ch; }
+    } else {
+      if (ch === '"') { inQuotes = true; }
+      else if (ch === ',') { result.push(current.trim()); current = ''; }
+      else { current += ch; }
+    }
+  }
+  result.push(current.trim());
+  return result;
+}
+
+function parseCSV(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return null; // Need header + at least 1 row
+  const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, ''));
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const vals = parseCSVLine(lines[i]);
+    if (vals.length === 0 || (vals.length === 1 && !vals[0])) continue;
+    const row = {};
+    headers.forEach((h, j) => { row[h] = vals[j] || ''; });
+    rows.push(row);
+  }
+  return { headers, rows };
+}
+
+function mapCSVToPlant(row, headers) {
+  // Flexible column mapping — handles many naming conventions
+  const find = (...candidates) => {
+    for (const c of candidates) {
+      const match = headers.find(h => h === c || h.includes(c));
+      if (match && row[match]) return row[match];
+    }
+    return null;
+  };
+
+  const commonName = find('common_name', 'common', 'plant_name', 'plant', 'name', 'item', 'description', 'variety', 'species');
+  if (!commonName) return null; // Skip rows without a plant name
+
+  const parsePrice = (val) => {
+    if (!val) return null;
+    const cleaned = String(val).replace(/[$,\s]/g, '');
+    const num = parseFloat(cleaned);
+    return isNaN(num) ? null : num;
+  };
+
+  return {
+    common_name: commonName,
+    botanical_name: find('botanical_name', 'botanical', 'latin', 'scientific', 'bot_name') || null,
+    category: find('category', 'type', 'plant_type', 'class') || null,
+    container_size: find('container_size', 'container', 'size', 'pot_size', 'pot', 'gallon', 'gal') || null,
+    wholesale_price: parsePrice(find('wholesale_price', 'wholesale', 'cost', 'unit_cost', 'price')),
+    retail_price: parsePrice(find('retail_price', 'retail', 'sell_price', 'selling_price', 'msrp')),
+    sun_requirement: find('sun_requirement', 'sun', 'light', 'exposure') || null,
+    water_needs: find('water_needs', 'water', 'irrigation') || null,
+    is_native: (() => { const v = find('is_native', 'native'); return v ? /^(true|yes|y|1)$/i.test(v) : false; })(),
+    notes: find('notes', 'note', 'comments', 'comment', 'memo', 'details') || null,
+  };
+}
+
 app.post('/api/plants/import', authenticate, requireAdmin, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    if (!openaiClient) return res.status(503).json({ error: 'AI service not configured' });
 
-    const fileContent = req.file.buffer.toString('utf-8').substring(0, 15000);
-    const fileName = req.file.originalname;
+    const fileName = sanitizeFilename(req.file.originalname);
     const mimeType = req.file.mimetype;
+    const fileContent = req.file.buffer.toString('utf-8');
 
     console.log(`[plants/import] Parsing "${fileName}" (${mimeType}, ${req.file.size} bytes) for company ${req.user.companyId}`);
 
-    // Use GPT-4o to parse the nursery availability list
-    const aiResponse = await openaiClient.chat.completions.create({
-      model: config.openai.model,
-      messages: [
-        {
-          role: 'system',
-          content: `You are an expert at parsing nursery availability lists. These come in many formats — wholesale price sheets, availability PDFs, inventory spreadsheets. Extract structured plant data from the provided content.
+    let plantsList = [];
+    let warnings = [];
+    let parseMethod = 'unknown';
 
-For each plant found, return a JSON object with:
+    // ─── Try 1: Direct CSV parse (fast, no AI cost) ───
+    const isCSV = fileName.endsWith('.csv') || mimeType === 'text/csv' || mimeType === 'application/vnd.ms-excel';
+    if (isCSV) {
+      try {
+        const csvData = parseCSV(fileContent);
+        if (csvData && csvData.rows.length > 0) {
+          console.log(`[plants/import] CSV detected: ${csvData.rows.length} rows, headers: [${csvData.headers.join(', ')}]`);
+          for (const row of csvData.rows) {
+            const plant = mapCSVToPlant(row, csvData.headers);
+            if (plant) plantsList.push(plant);
+          }
+          if (plantsList.length > 0) {
+            parseMethod = 'csv-direct';
+            console.log(`[plants/import] Direct CSV parse: ${plantsList.length} plants extracted`);
+          } else {
+            warnings.push('CSV parsed but no plant names found in columns — falling back to AI parsing');
+          }
+        }
+      } catch (csvErr) {
+        console.warn(`[plants/import] Direct CSV parse failed: ${csvErr.message} — falling back to AI`);
+        warnings.push('CSV parse error — used AI parsing instead');
+      }
+    }
+
+    // ─── Try 2: GPT-4o AI parse (for non-CSV, complex formats, or CSV fallback) ───
+    if (plantsList.length === 0) {
+      if (!openaiClient) {
+        // No AI available — try brute force CSV on any text file
+        try {
+          const csvData = parseCSV(fileContent);
+          if (csvData && csvData.rows.length > 0) {
+            for (const row of csvData.rows) {
+              const plant = mapCSVToPlant(row, csvData.headers);
+              if (plant) plantsList.push(plant);
+            }
+            parseMethod = 'csv-fallback';
+          }
+        } catch (e) { /* ignore */ }
+        if (plantsList.length === 0) {
+          return res.status(503).json({ error: 'Could not parse file. Please upload a CSV with column headers (e.g. name, size, price).' });
+        }
+      } else {
+        const truncated = fileContent.substring(0, 15000);
+        const aiResponse = await openaiClient.chat.completions.create({
+          model: config.openai.model,
+          messages: [
+            {
+              role: 'system',
+              content: `You are an expert at parsing nursery availability lists and product/service catalogs. These come in many formats — wholesale price sheets, availability PDFs, inventory spreadsheets, CSV exports. Extract structured plant/product data from the provided content.
+
+For each plant or product found, return a JSON object with:
 {
-  "common_name": "string (required)",
+  "common_name": "string (required — the product or plant name)",
   "botanical_name": "string or null",
-  "category": "tree|shrub|perennial|annual|groundcover|ornamental_grass|vine|succulent",
-  "container_size": "e.g. 1-gal, 3-gal, 5-gal, 15-gal, 30-gal",
+  "category": "tree|shrub|perennial|annual|groundcover|ornamental_grass|vine|succulent|hardscape|service|supply",
+  "container_size": "e.g. 1-gal, 3-gal, 5-gal, 15-gal, 30-gal, flat, each, linear_ft, sq_ft",
   "wholesale_price": number or null,
   "retail_price": number or null,
   "sun_requirement": "full_sun|partial_sun|shade|full_shade" or null,
@@ -2534,23 +2649,27 @@ For each plant found, return a JSON object with:
 }
 
 Return: { "plants": [...], "warnings": ["any issues"] }
-Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and mixed units.`
-        },
-        {
-          role: 'user',
-          content: `Parse this nursery availability list (format: ${mimeType}, filename: ${fileName}). Extract all plant data into structured JSON.\n\nContent:\n${fileContent}`
-        }
-      ],
-      response_format: { type: 'json_object' },
-      max_tokens: 4000,
-      temperature: 0.1,
-    });
+Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and mixed units. If it's a service (labor, delivery, installation), still include it with category "service".`
+            },
+            {
+              role: 'user',
+              content: `Parse this product list (format: ${mimeType}, filename: ${fileName}). Extract all items into structured JSON.\n\nContent:\n${truncated}`
+            }
+          ],
+          response_format: { type: 'json_object' },
+          max_tokens: 4000,
+          temperature: 0.1,
+        });
 
-    const parsed = JSON.parse(aiResponse.choices[0].message.content);
-    const plantsList = parsed.plants || [];
+        const parsed = JSON.parse(aiResponse.choices[0].message.content);
+        plantsList = parsed.plants || [];
+        warnings = [...warnings, ...(parsed.warnings || [])];
+        parseMethod = 'ai';
+      }
+    }
 
     if (plantsList.length === 0) {
-      return res.json({ message: 'No plants found in file', imported: 0, warnings: parsed.warnings || [] });
+      return res.json({ message: 'No products found in file', imported: 0, warnings });
     }
 
     // Insert each parsed plant into the plant_library
@@ -2558,21 +2677,23 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
     const errors = [];
     for (const p of plantsList) {
       try {
+        const safeName = stripHtml(p.common_name || '');
+        if (!safeName) { errors.push('Skipped row with empty name'); continue; }
         await db.getOne(
           `INSERT INTO plant_library (company_id, common_name, botanical_name, category, container_size, sun_requirement, water_needs, wholesale_price, retail_price, is_native, description, is_available)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true) RETURNING id`,
           [
             req.user.companyId,
-            p.common_name,
-            p.botanical_name || null,
+            safeName,
+            p.botanical_name ? stripHtml(p.botanical_name) : null,
             p.category || null,
-            p.container_size || null,
+            p.container_size ? stripHtml(p.container_size) : null,
             p.sun_requirement || null,
             p.water_needs || null,
             p.wholesale_price || null,
             p.retail_price || null,
             p.is_native || false,
-            p.notes || null,
+            p.notes ? stripHtml(p.notes) : null,
           ]
         );
         imported++;
@@ -2581,15 +2702,16 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
       }
     }
 
-    console.log(`[plants/import] Imported ${imported}/${plantsList.length} plants for company ${req.user.companyId}`);
+    console.log(`[plants/import] Imported ${imported}/${plantsList.length} plants via ${parseMethod} for company ${req.user.companyId}`);
 
-    await logActivity(req.user.companyId, req.user.userId, 'plant_library', null, 'import', `Imported ${imported} plants from ${fileName}`);
+    await logActivity(req.user.companyId, req.user.userId, 'plant_library', null, 'import', `Imported ${imported} plants from ${fileName} (${parseMethod})`);
 
     res.json({
-      message: `Successfully imported ${imported} plants`,
+      message: `Successfully imported ${imported} products`,
       imported,
       total: plantsList.length,
-      warnings: [...(parsed.warnings || []), ...errors],
+      method: parseMethod,
+      warnings: [...warnings, ...errors],
     });
   } catch (err) {
     console.error('[plants/import] Error:', err.message);
