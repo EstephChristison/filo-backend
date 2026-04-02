@@ -2131,7 +2131,10 @@ RULES:
 4. Maintain realistic transitions between the new hardscape and surrounding surfaces.
 5. Do NOT move, remove, or alter any plants, structures, or features outside the masked area.
 6. The result must look like a real photograph with natural lighting and correct shadows for the new material.
-7. Common hardscape materials: flagstone, pavers, natural stone, decomposed granite, concrete, brick, gravel, river rock, steel edging, stone borders, retaining walls, stepping stones.`;
+
+CRITICAL — CLEAN SURFACE RULE:
+7. The new hardscape surface (pavers, flagstone, concrete, walkway, stepping stones, etc.) must be PERFECTLY CLEAN. No loose gravel, mulch, dirt, sand, decomposed granite, or any other substrate material scattered on top of the finished surface. If the surrounding area has gravel, mulch, or other ground cover, that material STOPS at the edge of the hardscape — it does NOT spill onto, scatter across, or appear on the surface of the new walkway/pavers/flagstone/concrete. The hardscape surface should look freshly installed and swept clean. Joints between pavers may have polymeric sand but NO loose debris on the face of any paver or stone.
+8. Common hardscape materials: flagstone, pavers, natural stone, decomposed granite, concrete, brick, gravel, river rock, steel edging, stone borders, retaining walls, stepping stones.`;
 
     let response;
     for (let attempt = 1; attempt <= 2; attempt++) {
