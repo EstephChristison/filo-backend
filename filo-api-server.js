@@ -1698,7 +1698,7 @@ STRICT BED EDGE RESHAPING RULES:
 // ─── Design Render (Gemini — new plants inpainted onto property photo) ──
 app.post('/api/design-render', authenticate, async (req, res) => {
   try {
-    const { photoUrl, designPlants, keptPlants, removedPlants, designStyle, maskDataUrl } = req.body;
+    const { photoUrl, designPlants, keptPlants, removedPlants, designStyle, maskDataUrl, plantPins } = req.body;
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
 
@@ -1806,7 +1806,11 @@ ${plantDesc}
 ⚠️ EXACT PLANT COUNT — ${totalPlantCount} TOTAL PLANTS:
 ${speciesCountList}
 You MUST render EXACTLY this many individual plants for each species. Count them as you place them. Do NOT add extra plants beyond what is listed. Do NOT render fewer than listed. The visual count must match the numbers above PRECISELY.
-
+${plantPins && plantPins.length > 0 ? `
+📌 SPECIFIC PLANT PLACEMENT REQUESTS — The client has marked exact locations on the photo where they want specific plants:
+${plantPins.filter(p => p.request?.trim()).map((pin, i) => `  PIN ${i + 1} (${Math.round(pin.x)}% from left edge, ${Math.round(pin.y)}% from top edge of the photo): Place "${pin.request.trim()}" at this exact location`).join('\n')}
+You MUST place these specific plants at or very near the marked positions. These are the client's priority requests — honor them precisely.
+` : ''}
 RULES:
 1. Everything in this photo that is NOT the mulch bed must stay IDENTICAL — house, brick, windows, siding, driveway, lawn, sky, existing trees/shrubs.${keptPlantsDesc ? '\n2. These existing plants must remain unchanged: ' + keptPlantsDesc.replace(/\n- /g, ', ').replace(/^- /, '') : ''}
 ${removedPlantsDesc ? `3. Do NOT add back any ${removedPlantsDesc}. Those were removed on purpose. They should NOT appear in the final image.\n` : ''}4. Only add the EXACT plants listed above. No other species. No extra plants.
