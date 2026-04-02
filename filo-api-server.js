@@ -1415,13 +1415,33 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
       .jpeg({ quality: 85 })
       .toBuffer();
 
+    // Calculate letterbox offset — photo uses fit:'contain' so we must align the mask
+    const scale = Math.min(1024 / origW, 1024 / origH);
+    const scaledW = Math.round(origW * scale);
+    const scaledH = Math.round(origH * scale);
+    const offsetX = Math.round((1024 - scaledW) / 2);
+    const offsetY = Math.round((1024 - scaledH) / 2);
+    console.log('[bed-edge] Letterbox: photo %dx%d → %dx%d, offset (%d, %d)', origW, origH, scaledW, scaledH, offsetX, offsetY);
+
     let maskResized = null;
     if (hasMask) {
       const maskB64 = maskDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
-      maskResized = await sharp(Buffer.from(maskB64, 'base64'))
-        .resize(1024, 1024, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+      const rawMask = Buffer.from(maskB64, 'base64');
+      // The frontend mask is 1024x1024 with drawn area as black on white.
+      // But the photo is letterboxed — scale the mask to match the photo content area,
+      // then composite it onto a white 1024x1024 canvas at the correct offset.
+      const maskScaled = await sharp(rawMask)
+        .resize(scaledW, scaledH, { fit: 'fill' })
         .png()
         .toBuffer();
+      // Create white 1024x1024 canvas and place the scaled mask at the letterbox offset
+      maskResized = await sharp({
+        create: { width: 1024, height: 1024, channels: 3, background: { r: 255, g: 255, b: 255 } }
+      })
+        .composite([{ input: maskScaled, left: offsetX, top: offsetY }])
+        .png()
+        .toBuffer();
+      console.log('[bed-edge] Mask aligned to letterbox: placed %dx%d at (%d,%d)', scaledW, scaledH, offsetX, offsetY);
     }
 
     const edgeDesc = edgeStyle === 'square'
