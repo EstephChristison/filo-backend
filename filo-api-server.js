@@ -2129,9 +2129,16 @@ Plants being removed: ${removePlants || 'none'}`
           const designStyle = project.design_style || 'naturalistic';
           const maxSpecies = parseInt(req.body?.maxSpecies) || parseInt(project.max_species) || 3;
 
+          // Count how many species the client explicitly requested
+          const clientRequestedPlants = (project.special_requests || '').split(/[,;&]+/).map(s => s.trim()).filter(s => s.length > 1 && !/^\(.*\)$/.test(s) && !s.match(/^(border|accent|filler|groundcover|tall|short|low|medium)$/i));
+          const clientSpeciesCount = clientRequestedPlants.length;
+          const remainingSlots = Math.max(0, maxSpecies - clientSpeciesCount);
+
           let userPrompt = `Design a complete ${designStyle} landscape renovation for this property. Return your response as JSON.
 
-⚠️ HARD SPECIES LIMIT: You MUST use EXACTLY ${maxSpecies} different plant species total across ALL layers combined. Count your species before responding — if you have more than ${maxSpecies}, remove extras. If you have fewer than ${maxSpecies}, add more.${maxSpecies === 1 ? ' The ENTIRE bed must be filled with ONE single plant type only — the same species in every layer.' : ` Spread ${maxSpecies} species across the layers. The same species CAN appear in multiple layers — that still counts as 1 species.`}
+⚠️ HARD SPECIES LIMIT: You MUST use EXACTLY ${maxSpecies} different plant species total across ALL layers combined.${clientSpeciesCount > 0 ? `
+The client has specifically requested ${clientSpeciesCount} plant${clientSpeciesCount > 1 ? 's' : ''}: ${clientRequestedPlants.join(', ')}. You MUST include ALL of these.${remainingSlots > 0 ? ` You may choose ${remainingSlots} additional species to fill the remaining slot${remainingSlots > 1 ? 's' : ''} — pick plants that complement the client's choices.` : ' Do NOT add any other species beyond what the client requested.'}` : ''}
+Count your species before responding — your total unique species count must equal exactly ${maxSpecies}.${maxSpecies === 1 ? ' The ENTIRE bed must be filled with ONE single plant type only — the same species in every layer.' : ` Spread ${maxSpecies} species across the layers. The same species CAN appear in multiple layers — that still counts as 1 species.`}
 
 LOCATION: ${locationStr}
 
@@ -2170,8 +2177,8 @@ ${styleGuide[designStyle] || styleGuide.naturalistic}
               role: 'system',
               content: `You are FILO — a master landscape architect with 50 years of hands-on residential design experience in the Gulf Coast region.
 
-RULE #1 — CLIENT REQUESTS OVERRIDE EVERYTHING:
-If the client specifies which plants they want, use ONLY those EXACT plants. Do NOT substitute, swap, or replace any of them with alternatives — even if you think another plant would be "better suited" or "more appropriate." If they say "azaleas" — use AZALEAS, not Indian Hawthorn, not Loropetalum. If they say "Esperanza" — use Esperanza, not Gold Star, not Crossvine. The client chose these plants. Use them. Place their requested plants in the appropriate layers by mature height, and adjust quantities to fill the bed. Leave layers empty if the client's plants don't fit that layer — do NOT invent plants to fill empty layers.
+RULE #1 — CLIENT PLANT REQUESTS ARE SACRED:
+If the client specifies plants, you MUST include ALL of them. Do NOT substitute, swap, or replace any with alternatives. If they say "azaleas" — use AZALEAS, not Indian Hawthorn. If the species count allows more plants than the client named, YOU choose the extras to complement their picks. If the client named MORE plants than the species limit, include all of them anyway (client requests override the species count). Place plants in the appropriate layers by mature height, and adjust quantities to fill the bed.
 
 RULE #2 — SPECIES COUNT (STRICTLY ENFORCED):
 The client has requested EXACTLY ${maxSpecies} different plant species. Before you output JSON, COUNT your unique species names. If your count ≠ ${maxSpecies}, FIX IT. This is non-negotiable.${maxSpecies === 1 ? ' Use ONLY ONE plant species. The same plant in every layer. Nothing else.' : ` Use exactly ${maxSpecies} unique plant names total. The same species in different layers counts as 1 species.`} When the client does not specify which plants, choose plants yourself for 3 professional layers:
