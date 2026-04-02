@@ -1371,6 +1371,127 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
   }
 });
 
+// ─── Bed Edge Preview (Gemini — reshape bed perimeter) ──
+app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
+  try {
+    if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
+    const { photoUrl, maskDataUrl, edgeStyle, adjustmentFeet } = req.body;
+    if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
+    if (!maskDataUrl) return res.status(400).json({ error: 'Draw the bed edge first' });
+
+    // SSRF protection
+    const allowedHosts = [
+      config.supabaseStorage.url.replace(/^https?:\/\//, ''),
+      'yxgwtrbbczgffrzmjahe.supabase.co',
+    ];
+    if (!photoUrl.startsWith('data:')) {
+      try {
+        const parsedUrl = new URL(photoUrl);
+        const isAllowed = allowedHosts.some(h => parsedUrl.hostname === h || parsedUrl.hostname.endsWith('.' + h));
+        if (!isAllowed) return res.status(400).json({ error: 'photoUrl must be a Supabase Storage URL' });
+      } catch {
+        return res.status(400).json({ error: 'Invalid photoUrl' });
+      }
+    }
+
+    console.log('[bed-edge] Downloading photo...');
+    let photoBuffer;
+    if (photoUrl.startsWith('data:')) {
+      const b64 = photoUrl.replace(/^data:image\/[^;]+;base64,/, '');
+      photoBuffer = Buffer.from(b64, 'base64');
+    } else {
+      const photoResponse = await fetch(photoUrl);
+      if (!photoResponse.ok) throw new Error(`Failed to download photo: ${photoResponse.status}`);
+      photoBuffer = Buffer.from(await photoResponse.arrayBuffer());
+    }
+
+    const metadata = await sharp(photoBuffer).metadata();
+    const origW = metadata.width;
+    const origH = metadata.height;
+    console.log('[bed-edge] Photo: %dx%d, style: %s, adjustment: %d ft', origW, origH, edgeStyle, adjustmentFeet || 0);
+
+    const resizedBuffer = await sharp(photoBuffer)
+      .resize(1024, 1024, { fit: 'contain', background: { r: 0, g: 0, b: 0 } })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+
+    const maskB64 = maskDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
+    const maskResized = await sharp(Buffer.from(maskB64, 'base64'))
+      .resize(1024, 1024, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+      .png()
+      .toBuffer();
+
+    const edgeDesc = edgeStyle === 'square'
+      ? 'sharp 90-degree angles and straight geometric lines — like a professionally cut formal bed'
+      : 'smooth flowing curves with natural rounded transitions — like a professionally cut naturalistic bed';
+
+    const adjustDesc = !adjustmentFeet || adjustmentFeet === 0
+      ? 'Keep the bed boundary exactly where the drawn line indicates.'
+      : adjustmentFeet > 0
+        ? `Expand the bed outward by approximately ${adjustmentFeet} feet beyond the drawn line, pushing into the lawn/grass area. Add fresh mulch to the expanded area.`
+        : `Shrink the bed inward by approximately ${Math.abs(adjustmentFeet)} feet from the drawn line. Replace the shrunk area with matching lawn/grass.`;
+
+    console.log('[bed-edge] Calling Gemini...');
+    const response = await googleAI.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: 'Here is the current property photo:' },
+            { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
+            { text: 'Here is a mask image. The BLACK filled area represents the desired landscape bed area. WHITE areas are outside the bed (lawn, driveway, etc).' },
+            { inlineData: { mimeType: 'image/png', data: maskResized.toString('base64') } },
+            { text: `STRICT BED EDGE RESHAPING RULES:
+1. Reshape the landscape bed edge to follow the boundary of the black mask area.
+2. The bed edge style must be: ${edgeDesc}.
+3. ${adjustDesc}
+4. Inside the bed: maintain existing mulch, soil, plants, and clean bed surface exactly as they are.
+5. Outside the bed: maintain existing lawn, grass, hardscape, or whatever surface is there.
+6. Create a clean, professional steel-edged transition between the bed and the surrounding surface. The edge should look like it was just cut by a professional landscaper — crisp, defined, with a slight trench reveal.
+7. DO NOT modify the house, driveway, sidewalk, fence, trees, or any structure. ONLY reshape the bed-to-lawn boundary.
+8. DO NOT add, remove, or move any plants. The plants stay exactly where they are.
+9. Preserve the overall lighting, shadows, and perspective of the original photo. The result must look like a real photograph.` },
+          ],
+        },
+      ],
+      config: {
+        responseModalities: ['image', 'text'],
+      },
+    });
+
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    const imagePart = parts.find(p => p.inlineData);
+    if (!imagePart?.inlineData?.data) {
+      const textPart = parts.find(p => p.text);
+      throw new Error(textPart?.text || 'Gemini returned no image data');
+    }
+
+    const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
+    console.log('[bed-edge] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
+
+    const resultMeta = await sharp(resultBuffer).metadata();
+    const scale = Math.min(1024 / origW, 1024 / origH);
+    const scaledW = Math.round(origW * scale);
+    const scaledH = Math.round(origH * scale);
+    const offsetX = Math.round((1024 - scaledW) / 2);
+    const offsetY = Math.round((1024 - scaledH) / 2);
+
+    const croppedBuffer = await sharp(resultBuffer)
+      .extract({ left: offsetX, top: offsetY, width: Math.min(scaledW, resultMeta.width - offsetX), height: Math.min(scaledH, resultMeta.height - offsetY) })
+      .resize(origW, origH, { fit: 'fill' })
+      .jpeg({ quality: 92 })
+      .toBuffer();
+
+    const resultDataUrl = `data:image/jpeg;base64,${croppedBuffer.toString('base64')}`;
+    console.log('[bed-edge] Complete:', Math.round(croppedBuffer.length / 1024), 'KB');
+    res.json({ previewUrl: resultDataUrl });
+  } catch (err) {
+    console.error('[bed-edge] Error:', err.message);
+    res.status(500).json({ error: `Bed edge preview failed: ${err.message}` });
+  }
+});
+
 // ─── Design Render (Gemini — new plants inpainted onto property photo) ──
 app.post('/api/design-render', authenticate, async (req, res) => {
   try {
