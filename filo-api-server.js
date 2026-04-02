@@ -2439,7 +2439,7 @@ app.post('/api/plants', authenticate, requireAdmin, async (req, res) => {
 app.get('/api/plants/:id', authenticate, async (req, res) => {
   try {
     const plant = await db.getOne(
-      'SELECT * FROM plant_library WHERE id = $1 AND (company_id = $2 OR is_global = true)',
+      'SELECT * FROM plant_library WHERE id = $1 AND (company_id = $2 OR company_id IS NULL)',
       [req.params.id, req.user.companyId]
     );
     if (!plant) return res.status(404).json({ error: 'Plant not found' });
@@ -2731,7 +2731,7 @@ app.post('/api/projects/:projectId/designs/generate', authenticate, requireActiv
 
     const areas = await db.getMany('SELECT * FROM property_areas WHERE project_id = $1', [project.id]);
     const company = await db.getOne('SELECT * FROM companies WHERE id = $1', [req.user.companyId]);
-    const plants = await db.getMany('SELECT * FROM plant_library WHERE (company_id = $1 OR is_global = true) AND is_available = true', [req.user.companyId]);
+    const plants = await db.getMany('SELECT * FROM plant_library WHERE (company_id = $1 OR company_id IS NULL) AND is_available = true', [req.user.companyId]);
 
     const designs = [];
     for (const area of areas) {
@@ -3764,7 +3764,7 @@ app.get('/api/export/projects', authenticate, async (req, res) => {
 app.get('/api/export/plants/csv', authenticate, async (req, res) => {
   try {
     const plants = await db.getMany(
-      'SELECT common_name, botanical_name, category, container_size, retail_price, sun_requirement, water_needs FROM plant_library WHERE company_id = $1 OR is_global = true',
+      'SELECT common_name, botanical_name, category, container_size, retail_price, sun_requirement, water_needs FROM plant_library WHERE company_id = $1 OR company_id IS NULL',
       [req.user.companyId]
     );
 
@@ -4503,6 +4503,52 @@ app.listen(config.port, async () => {
     console.log('   saved_prompts table ready');
   } catch (e) {
     console.warn('   saved_prompts table check failed:', e.message);
+  }
+
+  // Ensure plant_library table exists with all required columns
+  try {
+    await db.query(`CREATE TABLE IF NOT EXISTS plant_library (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      company_id UUID NOT NULL,
+      common_name VARCHAR(255) NOT NULL,
+      botanical_name VARCHAR(255),
+      category VARCHAR(100),
+      container_size VARCHAR(100),
+      mature_height VARCHAR(100),
+      mature_width VARCHAR(100),
+      sun_requirement VARCHAR(50),
+      water_needs VARCHAR(50),
+      bloom_color VARCHAR(100),
+      bloom_season VARCHAR(100),
+      foliage_color VARCHAR(100),
+      image_url TEXT,
+      description TEXT,
+      poetic_description TEXT,
+      retail_price NUMERIC(10,2),
+      wholesale_price NUMERIC(10,2),
+      tags TEXT,
+      is_native BOOLEAN DEFAULT false,
+      is_available BOOLEAN DEFAULT true,
+      sort_order INTEGER DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    // Add any missing columns (safe — IF NOT EXISTS)
+    const cols = [
+      ['is_available', 'BOOLEAN DEFAULT true'],
+      ['sort_order', 'INTEGER DEFAULT 0'],
+      ['wholesale_price', 'NUMERIC(10,2)'],
+      ['retail_price', 'NUMERIC(10,2)'],
+      ['is_native', 'BOOLEAN DEFAULT false'],
+      ['container_size', 'VARCHAR(100)'],
+      ['description', 'TEXT'],
+    ];
+    for (const [col, type] of cols) {
+      try { await db.query(`ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch (e) { /* column exists */ }
+    }
+    console.log('   plant_library table ready');
+  } catch (e) {
+    console.warn('   plant_library table check failed:', e.message);
   }
 });
 
