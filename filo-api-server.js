@@ -1729,11 +1729,30 @@ app.post('/api/design-render', authenticate, async (req, res) => {
       ? removedPlants.map(p => p.common_name || p.plant_name || 'unknown plant').join(', ')
       : '';
 
+    // Style guide for Gemini render — same master prompts used in GPT-4o plant selection
+    const renderStyleGuide = {
+      formal: 'FORMAL LANDSCAPE: Strict symmetry, axial alignment, geometric precision. Tightly clipped hedges forming defined borders. Evenly spaced ornamental trees with uniform canopy. Flower beds minimal and controlled with repeating patterns. Edges crisp and perfectly maintained. Stone urns, balustrades, gravel courts. Mood: disciplined, timeless, authoritative.',
+      naturalistic: 'NATURALISTIC LANDSCAPE: Organic, asymmetrical composition with soft transitions. Flowing curved lines. Plants clustered in drifts with natural rhythm and density variation. Edges between lawn, beds, and pathways are soft and blended. Natural materials — weathered stone, wood. Mood: immersive, relaxed, authentic.',
+      modern: 'MODERN/CONTEMPORARY LANDSCAPE: Minimalist, clean lines, strong geometry, intentional negative space. Hardscape dominates — poured concrete, large-format slabs, steel edging. Plantings sparse and sculptural. Color palette restrained: gray, black, white, deep green. Mood: sharp, controlled, sophisticated.',
+      tropical: 'TROPICAL LANDSCAPE: Dense, lush, resort-like with layered vegetation. Palms, banana trees, bird of paradise, elephant ears, ferns. Tight spacing with overlapping foliage. Vibrant saturated colors — deep greens with bright blooms. Mood: immersive, vibrant, luxurious.',
+      xeriscape: 'XERISCAPE LANDSCAPE: Water-efficient, minimal irrigation. Gravel, decomposed granite, crushed stone. Drought-tolerant species spaced widely. Boulders and rock formations. Earthy muted colors: tans, browns, silvers, soft greens. Mood: calm, efficient, resilient.',
+      mediterranean: 'MEDITERRANEAN LANDSCAPE: Warm, sun-driven, drought-tolerant with rustic elegance. Terracotta, natural stone, light pavers. Olive trees, lavender, rosemary, cypress. Warm earth tones — beige, terracotta, soft greens. Mood: warm, relaxed, timeless.',
+      cottage: 'COTTAGE GARDEN: Dense, informal, abundant flowering with romantic overflowing aesthetic. Tightly packed perennials, annuals, shrubs spilling over edges. Diverse vibrant colors. Narrow winding pathways. Mood: charming, nostalgic, controlled chaos.',
+      desert: 'DESERT/SOUTHWEST LANDSCAPE: Arid with bold plant forms. Sand, gravel, rock in warm tones. Cacti, succulents, agave spaced widely. Large boulders. Warm muted browns, tans, dusty greens. Mood: stark, dramatic, grounded.',
+      farmhouse: 'FARMHOUSE/RUSTIC LANDSCAPE: Simple, functional, natural materials. Hardy shrubs, native grasses, simple flowering plants in loose groupings. Wood, gravel, basic stone. Mood: practical, relaxed, grounded.',
+      transitional: 'TRANSITIONAL LANDSCAPE: Balanced blend of traditional structure with modern simplicity. Structured shrubs with looser ornamental grasses. Mix of classic and modern materials. Neutral palette with controlled accents. Mood: clean, approachable, adaptable.',
+    };
+    const activeStyle = designStyle || 'naturalistic';
+    const styleInstruction = renderStyleGuide[activeStyle] || renderStyleGuide.naturalistic;
+
     const designPrompt = `You are a landscape designer adding new plants to this photo of a residential property.
+
+DESIGN STYLE: ${activeStyle.toUpperCase()}
+${styleInstruction}
 
 THIS IS THE CURRENT STATE OF THE PROPERTY. What you see in this photo is exactly how the property looks RIGHT NOW.
 ${isRemovalPreview ? `Some plants were previously removed from this bed — that work is already done. The bed currently has bare mulch where those plants used to be.${removedPlantsDesc ? ' The following plants were removed and are GONE: ' + removedPlantsDesc + '. Do NOT add these back.' : ''}\n` : ''}
-YOUR TASK: Add ONLY the following new plants into the existing mulch bed:
+YOUR TASK: Add ONLY the following new plants into the existing mulch bed, following the ${activeStyle.toUpperCase()} design style for placement, spacing, and composition:
 ${plantDesc}
 
 ⚠️ EXACT PLANT COUNT — ${totalPlantCount} TOTAL PLANTS:
@@ -2361,27 +2380,99 @@ app.post('/api/projects/:projectId/designs/generate', authenticate, requireActiv
             full_shade: 'This bed gets less than 3 hours of direct sun. Choose shade-tolerant plants only. Ferns, Cast Iron Plant, Aspidistra, Holly Fern, Caladium for color.',
           };
 
-          // Build style-specific guidance — production-grade design system prompts
+          // Build style-specific guidance — production-grade master prompt system
           const styleGuide = {
-            formal: `FORMAL LANDSCAPE — Strict symmetry, axial alignment, geometric precision. Layout organized around a dominant central axis with mirrored elements on both sides. Plantings consist of tightly clipped hedges (boxwood, yaupon holly) forming defined borders and compartments. Incorporate topiary and evenly spaced ornamental trees with uniform canopy shaping. Flower beds are minimal and controlled — repeating patterns, limited color palette (white, lavender, seasonal annuals). No randomness — every plant placed intentionally and evenly spaced. Edges crisp and perfectly maintained. Mood: disciplined, timeless, authoritative.`,
+            formal: `FORMAL LANDSCAPE — MASTER PROMPT:
+A highly structured formal landscape defined by strict symmetry, axial alignment, and geometric precision. The layout is organized around a dominant central axis extending from the primary viewpoint, with mirrored elements on both sides.
+Include a strong focal point such as a classical stone fountain, sculpture, or circular parterre positioned at the intersection of major sightlines. Pathways are straight, evenly spaced, and constructed from cut limestone, brick, or modular pavers, forming clean geometric patterns.
+Plantings consist of tightly clipped hedges such as boxwood or yaupon holly forming defined borders and compartments. Incorporate topiary elements and evenly spaced ornamental trees such as live oak, magnolia, or Italian cypress with uniform canopy shaping. Lawn areas are pristine, level, and sharply edged against planting beds.
+Flower beds are minimal and controlled, using repeating patterns and limited color palettes such as white, lavender, or seasonal annual rotations. No randomness — every plant is placed intentionally and evenly spaced.
+Hardscape elements include stone urns, balustrades, gravel courts, and low retaining walls. Edges are crisp and perfectly maintained.
+Lighting is subtle and symmetrical, highlighting pathways and focal points evenly.
+Mood is disciplined, timeless, and authoritative. The space conveys control, wealth, and permanence.`,
 
-            naturalistic: `NATURALISTIC LANDSCAPE — Organic, ecologically inspired, asymmetrical composition with soft transitions. Avoid rigid geometry — use flowing, curved lines. Plants arranged in layered groupings: canopy trees, understory shrubs, ornamental grasses, groundcover. Cluster plants in drifts rather than even spacing — natural rhythm and density variation. Include seasonal diversity with staggered bloom times, texture variation, and movement in wind. Incorporate pollinator-friendly and habitat-supporting species. Edges between lawn, beds, and pathways are soft and blended. Mood: immersive, relaxed, authentic — a curated extension of nature.`,
+            naturalistic: `NATURALISTIC LANDSCAPE — MASTER PROMPT:
+An organic, ecologically inspired landscape designed to mimic natural plant communities with asymmetrical composition and soft transitions. The layout avoids rigid geometry and instead uses flowing, curved lines that guide movement naturally.
+Pathways are meandering and constructed from decomposed granite, mulch trails, or irregular flagstone. Edges between lawn, planting beds, and pathways are soft and blended rather than sharply defined.
+Plant palette consists of regionally appropriate native and adaptive species arranged in layered groupings: canopy trees, understory shrubs, ornamental grasses, and groundcover. Plants are clustered in drifts rather than evenly spaced, creating a natural rhythm and density variation.
+Include seasonal diversity, with plants chosen for staggered bloom times, texture variation, and movement in wind. Incorporate pollinator-friendly species and habitat-supporting vegetation.
+Water features, if present, resemble natural streams or ponds with irregular stone edges and gradual transitions.
+Hardscape is minimal and uses natural materials such as weathered stone or wood. No polished or overly refined finishes.
+Lighting is low and ambient, mimicking natural light patterns rather than highlighting structure.
+Mood is immersive, relaxed, and authentic. The landscape should feel like a curated extension of nature rather than a constructed environment.`,
 
-            modern: `MODERN/CONTEMPORARY LANDSCAPE — Minimalist, clean lines, strong geometry, intentional negative space. Structured but not symmetrical — rectangles, linear paths, sharp angles to define zones. Plantings are sparse and highly intentional — sculptural species (agave, yucca, boxwood spheres, bamboo, ornamental grasses) treated as architectural elements, not mass plantings. Color palette restrained: gray, black, white, deep green with occasional sparse accents. Lawn minimal or eliminated — open space is a key design element. Mood: sharp, controlled, sophisticated — precision and high-end design.`,
+            modern: `MODERN / CONTEMPORARY LANDSCAPE — MASTER PROMPT:
+A minimalist modern landscape defined by clean lines, strong geometry, and intentional use of negative space. The layout is structured but not symmetrical, using rectangles, linear paths, and sharp angles to define zones.
+Hardscape dominates the design, featuring materials such as poured-in-place concrete, large-format slabs, steel edging, and gravel. Pathways consist of floating concrete pavers with precise spacing.
+Plantings are sparse and highly intentional, using sculptural species such as agave, yucca, boxwood spheres, bamboo, or ornamental grasses. Plants are treated as architectural elements rather than mass plantings.
+Color palette is restrained, dominated by neutral tones such as gray, black, white, and deep green. Occasional accent colors may be used sparingly.
+Lawn areas are minimal or eliminated entirely. Open space is a key design element.
+Water features, if present, are geometric and minimal, such as reflecting pools or linear fountains.
+Lighting is integrated and architectural, emphasizing shadows, lines, and textures.
+Mood is sharp, controlled, and sophisticated. The space conveys precision, efficiency, and high-end design.`,
 
-            tropical: `TROPICAL LANDSCAPE — Dense, lush, resort-like environment with layered vegetation and immersive coverage. Plant palette includes palms, banana trees, bird of paradise, hibiscus, elephant ears, ferns, and broadleaf tropicals. Vegetation layered vertically: tall canopy palms, mid-level shrubs, dense groundcover. Tight spacing with overlapping foliage — full, abundant appearance. Large leaves and contrasting textures dominate. Color palette vibrant and saturated: deep greens with bright blooms in reds, oranges, yellows. Pathways partially concealed by planting. Mood: immersive, vibrant, luxurious — alive, slightly wild, enclosed.`,
+            tropical: `TROPICAL LANDSCAPE — MASTER PROMPT:
+A dense, lush tropical landscape designed to create a resort-like environment with layered vegetation and immersive plant coverage. The layout prioritizes enclosure, depth, and sensory richness.
+Plant palette includes palms, banana trees, bird of paradise, hibiscus, elephant ears, ferns, and other broadleaf tropical species. Vegetation is layered vertically with tall canopy palms, mid-level shrubs, and dense groundcover.
+Plant spacing is tight, with overlapping foliage creating a full, abundant appearance. Large leaves and contrasting textures dominate the visual experience.
+Color palette is vibrant and saturated, combining deep greens with bright tropical blooms in reds, oranges, and yellows.
+Pathways are natural and partially concealed, using stepping stones or irregular stone surfaces surrounded by planting.
+Water features such as waterfalls, ponds, or pools are integrated seamlessly into the environment, often surrounded by dense planting.
+Hardscape materials include natural stone, textured concrete, and wood.
+Lighting is warm and dramatic, highlighting foliage and creating depth at night.
+Mood is immersive, vibrant, and luxurious. The environment feels alive, slightly wild, and enclosed.`,
 
-            xeriscape: `XERISCAPE LANDSCAPE — Water-efficient, minimal irrigation, long-term sustainability. Ground surfaces dominated by gravel, decomposed granite, or crushed stone in natural tones. Dry riverbeds or drainage swales may be incorporated. Plant palette: drought-tolerant species (agave, yucca, cacti, desert grasses, hardy shrubs) spaced widely so each specimen stands out individually. Boulders, stone clusters, and naturalistic rock formations integrated into design. Color palette earthy and muted: tans, browns, silvers, soft greens. No dense lawn — turf eliminated or extremely limited. Mood: calm, efficient, resilient — environmental awareness and low maintenance.`,
+            xeriscape: `XERISCAPE LANDSCAPE — MASTER PROMPT:
+A water-efficient xeriscape landscape designed for minimal irrigation and long-term sustainability. The layout emphasizes spacing, simplicity, and material contrast.
+Ground surfaces are dominated by gravel, decomposed granite, or crushed stone in natural tones. Dry riverbeds or drainage swales may be incorporated.
+Plant palette includes drought-tolerant species such as agave, yucca, cacti, desert grasses, and hardy shrubs. Plants are spaced widely to allow each specimen to stand out individually.
+Hardscape elements include boulders, stone clusters, and naturalistic rock formations integrated into the design.
+Color palette is earthy and muted, featuring tans, browns, silvers, and soft greens.
+Irrigation is minimal and designed for efficiency, typically drip-based.
+No dense lawn areas; turf is eliminated or extremely limited.
+Lighting is subtle and focused on highlighting plant forms and textures.
+Mood is calm, efficient, and resilient. The space reflects environmental awareness and low-maintenance design.`,
 
-            mediterranean: `MEDITERRANEAN LANDSCAPE — Warm, sun-driven, combining drought tolerance with refined rustic elegance. Open spaces, gravel surfaces, structured but relaxed geometry. Courtyard-style layouts common. Plant palette: olive trees, lavender, rosemary, cypress, and drought-tolerant aromatic plants, spaced to allow airflow and sun exposure. Color palette: warm earth tones — beige, terracotta, soft greens. Hardscape integrates stucco walls, clay pots, terracotta, natural stone, rustic textures. Mood: warm, relaxed, timeless — balance between structure and informality.`,
+            mediterranean: `MEDITERRANEAN LANDSCAPE — MASTER PROMPT:
+A warm, sun-driven Mediterranean landscape combining drought tolerance with refined, rustic elegance. The layout features open spaces, gravel surfaces, and structured but relaxed geometry.
+Pathways and patios use materials such as terracotta, natural stone, or light-colored pavers. Courtyard-style layouts are common.
+Plant palette includes olive trees, lavender, rosemary, cypress, and other drought-tolerant aromatic plants. Vegetation is spaced to allow airflow and sun exposure.
+Color palette emphasizes warm earth tones, including beige, terracotta, and soft greens.
+Water features may include simple fountains or tiled basins.
+Hardscape integrates stucco walls, clay pots, and rustic textures.
+Mood is warm, relaxed, and timeless with a balance between structure and informality.`,
 
-            cottage: `COTTAGE GARDEN — Dense, informal, abundant flowering with romantic overflowing aesthetic. Layout is loose and asymmetrical with minimal visible structure. Plantings tightly packed and layered: wide variety of flowering perennials, annuals, and shrubs. Plants spill over pathways and edges creating soft, overflowing effect. Color palette diverse and vibrant with mixed blooms in multiple colors. Pathways narrow and winding, often partially covered by plant growth. Hardscape minimal and rustic — wooden elements, vintage-style features. Mood: charming, nostalgic, highly textured — controlled chaos.`,
+            cottage: `COTTAGE GARDEN — MASTER PROMPT:
+A dense, informal cottage garden filled with abundant flowering plants and a romantic, overflowing aesthetic. The layout is loose and asymmetrical with minimal visible structure.
+Plantings are tightly packed and layered, featuring a wide variety of flowering perennials, annuals, and shrubs. Plants spill over pathways and edges, creating a soft, overflowing effect.
+Color palette is diverse and vibrant, with mixed blooms in multiple colors.
+Pathways are narrow and winding, often made of stone or gravel and partially covered by plant growth.
+Hardscape is minimal and rustic, often including wooden elements or vintage-style features.
+Mood is charming, nostalgic, and highly textured with a sense of controlled chaos.`,
 
-            desert: `DESERT/SOUTHWEST LANDSCAPE — Arid environment with bold plant forms and minimal water use. Open space, strong shadows, sculptural elements. Ground surfaces: sand, gravel, rock in warm tones. Plant palette: cacti, succulents, agave, desert-adapted shrubs spaced widely. Large boulders and natural rock formations integrated into design. Color palette warm and muted: browns, tans, dusty greens. Lighting enhances contrast and shadow, emphasizing plant shapes. Mood: stark, dramatic, grounded in natural desert aesthetics.`,
+            desert: `DESERT / SOUTHWEST LANDSCAPE — MASTER PROMPT:
+A desert-inspired landscape reflecting arid environments with bold plant forms and minimal water use. The layout emphasizes open space, strong shadows, and sculptural elements.
+Ground surfaces consist of sand, gravel, and rock in warm tones.
+Plant palette includes cacti, succulents, agave, and desert-adapted shrubs spaced widely.
+Hardscape includes large boulders and natural rock formations integrated into the design.
+Color palette is warm and muted, dominated by browns, tans, and dusty greens.
+Lighting enhances contrast and shadow, emphasizing plant shapes.
+Mood is stark, dramatic, and grounded in natural desert aesthetics.`,
 
-            farmhouse: `FARMHOUSE/RUSTIC LANDSCAPE — Simple, functional, blending natural materials with practical layout. Composition is open and unpretentious with focus on usability. Plant palette: hardy shrubs, native grasses, simple flowering plants in loose groupings. Hardscape uses wood, gravel, basic stone. Fencing, raised beds, and functional outdoor spaces are common. Color palette natural and subdued. Mood: practical, relaxed, grounded — balance between function and aesthetic.`,
+            farmhouse: `FARMHOUSE / RUSTIC LANDSCAPE — MASTER PROMPT:
+A simple, functional farmhouse landscape blending natural materials with practical layout design. The composition is open and unpretentious with a focus on usability.
+Plant palette includes hardy shrubs, native grasses, and simple flowering plants arranged in loose groupings.
+Hardscape uses wood, gravel, and basic stone elements. Fencing, raised beds, and functional outdoor spaces are common.
+Color palette is natural and subdued.
+Mood is practical, relaxed, and grounded, with a balance between function and aesthetic.`,
 
-            transitional: `TRANSITIONAL LANDSCAPE — Balanced blend of traditional structure with modern simplicity. Clean lines with softened edges — avoids extremes of rigidity or informality. Plant palette: structured shrubs combined with looser ornamental grasses and seasonal accents. Hardscape: mix of classic and modern materials, pavers with simplified patterns. Color palette neutral with controlled accents. Versatile and broadly appealing. Mood: clean, approachable, adaptable.`,
+            transitional: `TRANSITIONAL LANDSCAPE — MASTER PROMPT:
+A balanced transitional landscape blending traditional structure with modern simplicity. The layout combines clean lines with softened edges, avoiding extremes of rigidity or informality.
+Plant palette includes structured shrubs combined with looser ornamental grasses and seasonal accents.
+Hardscape uses a mix of classic and modern materials such as pavers with simplified patterns.
+Color palette is neutral with controlled accents.
+The design is versatile and broadly appealing, suitable for a wide range of properties.
+Mood is clean, approachable, and adaptable.`,
           };
 
           const sunExposure = project.sun_exposure || 'full_sun';
