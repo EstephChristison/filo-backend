@@ -1305,14 +1305,29 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
       .jpeg({ quality: 85 })
       .toBuffer();
 
-    // Mask: keep as PNG to preserve sharp black/white edges (JPEG blurs them)
+    // Align mask to match photo letterboxing — photo uses fit:'contain' so mask must match
+    const rpScale = Math.min(1024 / origW, 1024 / origH);
+    const rpScaledW = Math.round(origW * rpScale);
+    const rpScaledH = Math.round(origH * rpScale);
+    const rpOffsetX = Math.round((1024 - rpScaledW) / 2);
+    const rpOffsetY = Math.round((1024 - rpScaledH) / 2);
+    console.log('[removal-preview] Letterbox: photo %dx%d → %dx%d, offset (%d, %d)', origW, origH, rpScaledW, rpScaledH, rpOffsetX, rpOffsetY);
+
     const maskB64 = maskDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
-    const maskResized = await sharp(Buffer.from(maskB64, 'base64'))
-      .resize(1024, 1024, { fit: 'contain', background: { r: 255, g: 255, b: 255 } })
+    const rawMask = Buffer.from(maskB64, 'base64');
+    // Scale mask to match photo content area, then place on white canvas at letterbox offset
+    const maskScaled = await sharp(rawMask)
+      .resize(rpScaledW, rpScaledH, { fit: 'fill' })
+      .png()
+      .toBuffer();
+    const maskResized = await sharp({
+      create: { width: 1024, height: 1024, channels: 3, background: { r: 255, g: 255, b: 255 } }
+    })
+      .composite([{ input: maskScaled, left: rpOffsetX, top: rpOffsetY }])
       .png()
       .toBuffer();
 
-    console.log('[removal-preview] Mask size: %dKB (PNG, sharp edges preserved)', Math.round(maskResized.length / 1024));
+    console.log('[removal-preview] Mask aligned to letterbox: %dKB, placed %dx%d at (%d,%d)', Math.round(maskResized.length / 1024), rpScaledW, rpScaledH, rpOffsetX, rpOffsetY);
 
     const response = await googleAI.models.generateContent({
       model: 'gemini-2.5-flash-image',
@@ -1349,15 +1364,10 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
     console.log('[removal-preview] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
     // Extract the photo region from the 1024x1024 contain result (remove letterbox padding)
+    // Reuse rpScale/rpScaledW/rpScaledH/rpOffsetX/rpOffsetY from above
     const resultMeta = await sharp(resultBuffer).metadata();
-    const scale = Math.min(1024 / origW, 1024 / origH);
-    const scaledW = Math.round(origW * scale);
-    const scaledH = Math.round(origH * scale);
-    const offsetX = Math.round((1024 - scaledW) / 2);
-    const offsetY = Math.round((1024 - scaledH) / 2);
-
     const croppedBuffer = await sharp(resultBuffer)
-      .extract({ left: offsetX, top: offsetY, width: Math.min(scaledW, resultMeta.width - offsetX), height: Math.min(scaledH, resultMeta.height - offsetY) })
+      .extract({ left: rpOffsetX, top: rpOffsetY, width: Math.min(rpScaledW, resultMeta.width - rpOffsetX), height: Math.min(rpScaledH, resultMeta.height - rpOffsetY) })
       .resize(origW, origH, { fit: 'fill' })
       .jpeg({ quality: 92 })
       .toBuffer();
