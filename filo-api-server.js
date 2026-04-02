@@ -3107,7 +3107,7 @@ app.get('/api/export/plants/csv', authenticate, async (req, res) => {
 
 const callAI = createAIHandler(db);
 const openaiClient = config.openai.apiKey ? new OpenAI({ apiKey: config.openai.apiKey }) : null;
-const googleAI = process.env.GOOGLE_AI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY, httpOptions: { timeout: 180_000 } }) : null;
+const googleAI = process.env.GOOGLE_AI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY }) : null;
 
 async function callManusAI(taskType, data) {
   // Legacy function name kept for compatibility — routes to direct OpenAI calls
