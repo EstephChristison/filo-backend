@@ -1546,6 +1546,7 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
     console.log('[bed-edge] Letterbox: photo %dx%d → %dx%d, offset (%d, %d)', origW, origH, scaledW, scaledH, offsetX, offsetY);
 
     let maskResized = null;
+    let annotatedPhoto = null;
     if (hasMask) {
       const maskB64 = maskDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
       const rawMask = Buffer.from(maskB64, 'base64');
@@ -1564,6 +1565,39 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
         .png()
         .toBuffer();
       console.log('[bed-edge] Mask aligned to letterbox: placed %dx%d at (%d,%d)', scaledW, scaledH, offsetX, offsetY);
+
+      // Create an annotated photo with the mask boundary drawn as a bright overlay
+      // This helps Gemini visually see exactly where the new bed edge should be
+      // 1. Create a semi-transparent colored overlay from the mask (black areas become colored)
+      const maskRGBA = await sharp(maskResized)
+        .ensureAlpha()
+        .toBuffer();
+      // Invert: black (bed area) → bright orange overlay, white (outside) → transparent
+      const { data: maskPixels, info: maskInfo } = await sharp(maskRGBA).raw().toBuffer({ resolveWithObject: true });
+      const overlayPixels = Buffer.alloc(maskInfo.width * maskInfo.height * 4);
+      for (let i = 0; i < maskInfo.width * maskInfo.height; i++) {
+        const r = maskPixels[i * 4];
+        const g = maskPixels[i * 4 + 1];
+        const b = maskPixels[i * 4 + 2];
+        const isBed = (r < 128 && g < 128 && b < 128); // black = bed area
+        if (isBed) {
+          overlayPixels[i * 4] = 255;     // R — bright orange/red
+          overlayPixels[i * 4 + 1] = 100; // G
+          overlayPixels[i * 4 + 2] = 0;   // B
+          overlayPixels[i * 4 + 3] = 80;  // A — semi-transparent
+        } else {
+          overlayPixels[i * 4 + 3] = 0;   // fully transparent
+        }
+      }
+      const overlayBuffer = await sharp(overlayPixels, { raw: { width: maskInfo.width, height: maskInfo.height, channels: 4 } })
+        .png()
+        .toBuffer();
+      // Composite the overlay onto the resized photo
+      annotatedPhoto = await sharp(resizedBuffer)
+        .composite([{ input: overlayBuffer, blend: 'over' }])
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      console.log('[bed-edge] Created annotated photo with mask overlay: %dKB', Math.round(annotatedPhoto.length / 1024));
     }
 
     const edgeDesc = edgeStyle === 'square'
@@ -1577,32 +1611,37 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
         : `Shrink the bed inward by approximately ${Math.abs(adjustmentFeet)} feet from the current/drawn edge. Replace the shrunk area with matching lawn/grass.`;
 
     // Build prompt parts — with or without mask
-    const promptParts = [
-      { text: 'Here is the current property photo:' },
-      { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
-    ];
-    if (maskResized) {
+    const promptParts = [];
+    if (annotatedPhoto) {
+      // Send BOTH: the clean photo and the annotated photo with visible boundary overlay
       promptParts.push(
-        { text: 'Here is a mask image. The BLACK filled area represents the desired landscape bed area drawn by the user. WHITE areas are outside the bed.' },
-        { inlineData: { mimeType: 'image/png', data: maskResized.toString('base64') } },
+        { text: 'Here is the ORIGINAL property photo (clean, no markings):' },
+        { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
+        { text: 'Here is the SAME photo with the client\'s DESIRED NEW BED BOUNDARY drawn as an orange/red shaded overlay. The orange shaded area shows EXACTLY where the mulch bed must extend to:' },
+        { inlineData: { mimeType: 'image/jpeg', data: annotatedPhoto.toString('base64') } },
+      );
+    } else {
+      promptParts.push(
+        { text: 'Here is the current property photo:' },
+        { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
       );
     }
     promptParts.push({ text: `⚠️ THIS IS A BED EDGE RESHAPING TASK ONLY. You are NOT designing a landscape. You are NOT adding plants. You are ONLY reshaping the bed-to-lawn boundary line.
 
-${hasMask ? `⚠️⚠️⚠️ CRITICAL — MASK BOUNDARY INSTRUCTION:
-The black area in the mask represents the EXACT new bed shape the client drew. This is the #1 most important instruction:
+${hasMask ? `⚠️⚠️⚠️ CRITICAL — THE ORANGE SHADED AREA IN THE ANNOTATED PHOTO IS THE NEW BED SHAPE:
+The orange/red overlay on the second photo shows the EXACT area the client drew as the new bed boundary. Your output MUST match this shape:
 
-THE ENTIRE BLACK MASK AREA MUST BECOME MULCH BED. If the mask extends 5 feet into the lawn, then 5 feet of lawn MUST be replaced with mulch. The new bed edge line MUST trace the OUTER PERIMETER of the black mask area — not the existing bed edge. The existing bed edge is IRRELEVANT. ONLY the mask boundary matters.
-
-Look at the mask carefully. The black area is MUCH LARGER than the current bed. The client is EXPANDING the bed significantly into the lawn. You MUST honor this expansion fully. Do not default to the existing bed shape. The drawn mask IS the new bed shape.
-
-Every pixel of lawn that falls INSIDE the black mask boundary must be converted to mulch. The bed-to-lawn transition line must follow the mask's outer edge precisely.` : 'Reshape the EXISTING landscape bed edge visible in the photo.'}
+- The outer edge of the orange shaded area = the new bed edge line
+- ALL grass/lawn inside the orange area must be REPLACED with mulch
+- The bed is being EXPANDED significantly — the new bed extends much further into the lawn than the current bed
+- Your output must use the CLEAN photo as the base (no orange overlay in the result) but reshape the bed to match the overlay boundary
+- Do NOT default to the existing bed edge. The existing edge is being replaced by the drawn boundary.` : 'Reshape the EXISTING landscape bed edge visible in the photo.'}
 
 STRICT BED EDGE RESHAPING RULES:
 1. The bed edge style MUST be: ${edgeDesc}
 2. ${adjustDesc}
-3. ALL area inside the ${hasMask ? 'mask boundary' : 'bed boundary'}: must be mulch bed. Any lawn or grass currently inside this area must be REMOVED and replaced with fresh mulch matching the existing bed mulch color and texture. The existing mulch stays. New areas get new mulch.
-4. ALL area outside the ${hasMask ? 'mask boundary' : 'bed boundary'}: remains lawn/grass. Do not touch it.
+3. ALL area inside the ${hasMask ? 'drawn boundary (orange overlay area)' : 'bed boundary'}: must be mulch bed. Any lawn or grass currently inside this area must be REMOVED and replaced with fresh mulch matching the existing bed mulch color and texture. The existing mulch stays. New areas get new mulch.
+4. ALL area outside the ${hasMask ? 'drawn boundary' : 'bed boundary'}: remains lawn/grass. Do not touch it.
 5. The edge transition must be a clean, crisp, professionally cut steel-edge line — sharp and defined with a slight trench reveal. No gradual fade, no soft blending.
 6. DO NOT modify the house, driveway, sidewalk, fence, trees, or any structure. ONLY reshape the bed-to-lawn boundary.
 7. ⛔ ZERO PLANT CHANGES — Do NOT add ANY new plants. Do NOT remove ANY existing plants. Do NOT move, resize, recolor, or alter ANY vegetation. Every plant, shrub, tree, and blade of grass must remain PIXEL-IDENTICAL to the input photo. The ONLY change is the bed edge shape and the mulch fill.
