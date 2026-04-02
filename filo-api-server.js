@@ -1190,9 +1190,10 @@ app.put('/api/projects/:id', authenticate, async (req, res) => {
     if (!project) return res.status(404).json({ error: 'Project not found' });
     res.json(project);
   } catch (err) {
-    console.error('PUT /api/projects/:id error:', err.message);
+    console.error('PUT /api/projects/:id error:', err.message, '| code:', err.code, '| detail:', err.detail);
     if (err.code === '22001') return res.status(400).json({ error: 'One or more fields exceed maximum length' });
-    res.status(500).json({ error: 'Failed to update project' });
+    if (err.code === '22P02') return res.status(400).json({ error: `Invalid value for a field: ${err.message}` });
+    res.status(500).json({ error: `Failed to update project: ${err.message}` });
   }
 });
 
@@ -4332,6 +4333,24 @@ app.listen(config.port, async () => {
   // Ensure Supabase Storage bucket exists on startup
   if (supaStorage) {
     await supaStorage.ensureBucket();
+  }
+
+  // Ensure design_style column supports all 10 styles (may be enum or varchar)
+  try {
+    // Try to alter the column to VARCHAR if it's an enum — this handles all styles without constraint issues
+    await db.query(`ALTER TABLE projects ALTER COLUMN design_style TYPE VARCHAR(50)`);
+    console.log('   design_style column converted to VARCHAR(50)');
+  } catch (e) {
+    // If it's already VARCHAR or the ALTER fails, try adding missing enum values
+    const newStyles = ['mediterranean', 'cottage', 'desert', 'farmhouse', 'transitional'];
+    for (const style of newStyles) {
+      try {
+        await db.query(`ALTER TYPE design_style_enum ADD VALUE IF NOT EXISTS '${style}'`);
+      } catch (enumErr) {
+        // enum value already exists or type doesn't exist — that's fine
+      }
+    }
+    console.log('   design_style enum checked');
   }
 
   // Ensure saved_prompts table exists
