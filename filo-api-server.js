@@ -1589,16 +1589,24 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
     }
     promptParts.push({ text: `⚠️ THIS IS A BED EDGE RESHAPING TASK ONLY. You are NOT designing a landscape. You are NOT adding plants. You are ONLY reshaping the bed-to-lawn boundary line.
 
+${hasMask ? `⚠️⚠️⚠️ CRITICAL — MASK BOUNDARY INSTRUCTION:
+The black area in the mask represents the EXACT new bed shape the client drew. This is the #1 most important instruction:
+
+THE ENTIRE BLACK MASK AREA MUST BECOME MULCH BED. If the mask extends 5 feet into the lawn, then 5 feet of lawn MUST be replaced with mulch. The new bed edge line MUST trace the OUTER PERIMETER of the black mask area — not the existing bed edge. The existing bed edge is IRRELEVANT. ONLY the mask boundary matters.
+
+Look at the mask carefully. The black area is MUCH LARGER than the current bed. The client is EXPANDING the bed significantly into the lawn. You MUST honor this expansion fully. Do not default to the existing bed shape. The drawn mask IS the new bed shape.
+
+Every pixel of lawn that falls INSIDE the black mask boundary must be converted to mulch. The bed-to-lawn transition line must follow the mask's outer edge precisely.` : 'Reshape the EXISTING landscape bed edge visible in the photo.'}
+
 STRICT BED EDGE RESHAPING RULES:
-${hasMask ? `1. The black area in the mask is the EXACT bed boundary the user drew. The new bed edge MUST follow this boundary PRECISELY — pixel for pixel along the mask edge. Do NOT shrink the bed smaller than the drawn area. Do NOT round off corners that the user drew. The bed must extend ALL THE WAY to where the black mask reaches. If the mask extends into the lawn, the bed must extend into the lawn to match.` : '1. Reshape the EXISTING landscape bed edge visible in the photo.'}
-2. The bed edge style MUST be: ${edgeDesc}
-3. ${adjustDesc}
-4. EVERYTHING inside the bed boundary: keep all existing mulch, soil, plants, and surfaces exactly as they are. Fill any newly expanded areas (where lawn becomes bed) with fresh mulch matching the existing bed mulch.
-5. EVERYTHING outside the bed boundary: keep existing lawn, grass, hardscape as-is. Any bed area that is now outside the new boundary should become lawn/grass.
-6. The edge transition must be a clean, crisp, professionally cut steel-edge line — sharp and defined with a slight trench reveal. No gradual fade, no soft blending.
-7. DO NOT modify the house, driveway, sidewalk, fence, trees, or any structure. ONLY reshape the bed-to-lawn boundary.
-8. ⛔ ZERO PLANT CHANGES — Do NOT add ANY new plants. Do NOT remove ANY existing plants. Do NOT move, resize, recolor, or alter ANY vegetation. Every plant, shrub, tree, and blade of grass must remain PIXEL-IDENTICAL to the input photo. The ONLY change is the bed edge shape.
-9. The result must look like a real photograph with natural lighting and shadows.` });
+1. The bed edge style MUST be: ${edgeDesc}
+2. ${adjustDesc}
+3. ALL area inside the ${hasMask ? 'mask boundary' : 'bed boundary'}: must be mulch bed. Any lawn or grass currently inside this area must be REMOVED and replaced with fresh mulch matching the existing bed mulch color and texture. The existing mulch stays. New areas get new mulch.
+4. ALL area outside the ${hasMask ? 'mask boundary' : 'bed boundary'}: remains lawn/grass. Do not touch it.
+5. The edge transition must be a clean, crisp, professionally cut steel-edge line — sharp and defined with a slight trench reveal. No gradual fade, no soft blending.
+6. DO NOT modify the house, driveway, sidewalk, fence, trees, or any structure. ONLY reshape the bed-to-lawn boundary.
+7. ⛔ ZERO PLANT CHANGES — Do NOT add ANY new plants. Do NOT remove ANY existing plants. Do NOT move, resize, recolor, or alter ANY vegetation. Every plant, shrub, tree, and blade of grass must remain PIXEL-IDENTICAL to the input photo. The ONLY change is the bed edge shape and the mulch fill.
+8. The result must look like a real photograph with natural lighting and shadows.` });
 
     console.log('[bed-edge] Calling Gemini...');
     let response;
