@@ -1659,6 +1659,7 @@ Before outputting the image, examine EVERY corner of the bed edge — especially
           contents: [{ role: 'user', parts: promptParts }],
           config: {
             responseModalities: ['image', 'text'],
+            temperature: edgeStyle === 'square' ? 0.2 : 0.8,
           },
         });
         break;
