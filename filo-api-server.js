@@ -1589,18 +1589,7 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
     }
 
     const edgeDesc = edgeStyle === 'square'
-      ? `SQUARE 90° EDGES — THIS IS THE #1 MOST IMPORTANT RULE:
-Every single corner of this bed MUST be a PERFECT 90-DEGREE RIGHT ANGLE. No exceptions. No rounding. No softening. No curves whatsoever.
-- ALL edges must be PERFECTLY STRAIGHT LINES — as if cut with a laser against a straightedge ruler.
-- Every corner where two edges meet must form an EXACT 90° right angle — like the corner of a piece of paper.
-- If the existing bed has curves, IGNORE THEM. Convert every curve into straight segments that meet at sharp 90° corners.
-- The bed outline must look like a RECTANGLE, an L-SHAPE, or a series of connected RECTANGLES — geometric shapes ONLY.
-- ZERO curves. ZERO arcs. ZERO radius on corners. ZERO gradual bends. ZERO rounded transitions. Every turn is a sharp 90° snap.
-- The edge should look like a professional hardscape contractor used a string line and a square to cut it.
-- Think: the corner of a building, the edge of a sidewalk, a brick wall corner. That level of geometric precision.
-- If you are tempted to round ANY corner even slightly — DON'T. Make it sharper instead.
-- PAY SPECIAL ATTENTION TO THE END CAPS / TERMINATION POINTS of the bed — where the bed starts and ends. These are the spots most likely to get curved. The ends of the bed must STOP ABRUPTLY with a straight vertical cut line perpendicular to the house wall. The end of the bed is a flat wall of mulch, not a tapered point or rounded nose. Imagine a box was placed at the end — that's the shape. A flat 90° stop, not a rounded taper.
-- The bed outline from above should look like a PERFECT RECTANGLE — flat ends, straight sides, sharp corners. Not a rounded rectangle. Not a stadium shape. A RECTANGLE with ZERO corner radius.`
+      ? 'perfectly straight lines and exact 90-degree right angles at every corner. Even if the existing bed has curves, convert ALL curves into straight segments meeting at sharp 90° corners. The bed must look like a rectangle or series of rectangles — no curves, no arcs, no rounded transitions anywhere. The ends of the bed must terminate with flat straight cuts perpendicular to the house wall. Think formal garden geometry.'
       : 'smooth flowing curves with natural rounded transitions. Follow the natural contour the user drew (or the existing bed shape). Soften any sharp angles into gentle arcs. The edge should flow like a river — organic and graceful.';
 
     const adjustDesc = !adjustmentFeet || adjustmentFeet === 0
@@ -1644,10 +1633,7 @@ STRICT BED EDGE RESHAPING RULES:
 5. The edge transition must be a clean, crisp, professionally cut steel-edge line — sharp and defined with a slight trench reveal. No gradual fade, no soft blending.
 6. DO NOT modify the house, driveway, sidewalk, fence, trees, or any structure. ONLY reshape the bed-to-lawn boundary.
 7. ⛔ ZERO PLANT CHANGES — Do NOT add ANY new plants. Do NOT remove ANY existing plants. Do NOT move, resize, recolor, or alter ANY vegetation. Every plant, shrub, tree, and blade of grass must remain PIXEL-IDENTICAL to the input photo. The ONLY change is the bed edge shape and the mulch fill.
-8. The result must look like a real photograph with natural lighting and shadows.
-${edgeStyle === 'square' ? `
-⚠️ FINAL CHECK — SQUARE EDGE VERIFICATION:
-Before outputting the image, examine EVERY corner of the bed edge — especially the LEFT END and RIGHT END of the bed where it terminates. These end points are where curves sneak in most often. The ends must be FLAT STRAIGHT CUTS perpendicular to the wall — like the bed was sliced with a knife. No rounding, no tapering, no nose shape. Then check every other corner: every segment must be a perfectly straight line, and every direction change must be an abrupt 90° turn. If ANY corner has even a SLIGHT curve — redraw it as a sharp right angle. The bed outline viewed from above must be a perfect RECTANGLE, not a rounded rectangle. This is non-negotiable.` : ''}` });
+8. The result must look like a real photograph with natural lighting and shadows.` });
 
 
     console.log('[bed-edge] Calling Gemini...');
@@ -1659,7 +1645,6 @@ Before outputting the image, examine EVERY corner of the bed edge — especially
           contents: [{ role: 'user', parts: promptParts }],
           config: {
             responseModalities: ['image', 'text'],
-            temperature: edgeStyle === 'square' ? 0.2 : 0.8,
           },
         });
         break;
