@@ -1554,6 +1554,41 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
         .toBuffer();
       console.log('[bed-edge] Mask aligned to letterbox: placed %dx%d at (%d,%d)', scaledW, scaledH, offsetX, offsetY);
 
+      // SQUARE MODE: Convert the freeform mask into a bounding rectangle
+      // This ensures Gemini sees a rectangular shape and produces rectangular edges
+      if (edgeStyle === 'square') {
+        const { data: rectPixels, info: rectInfo } = await sharp(maskResized).raw().ensureAlpha().toBuffer({ resolveWithObject: true });
+        let minX = rectInfo.width, minY = rectInfo.height, maxX = 0, maxY = 0;
+        for (let y = 0; y < rectInfo.height; y++) {
+          for (let x = 0; x < rectInfo.width; x++) {
+            const idx = (y * rectInfo.width + x) * 4;
+            const r = rectPixels[idx], g = rectPixels[idx + 1], b = rectPixels[idx + 2];
+            if (r < 128 && g < 128 && b < 128) { // black pixel = bed area
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+        }
+        if (maxX > minX && maxY > minY) {
+          // Create a new mask with a clean rectangle
+          const rectCanvas = Buffer.alloc(rectInfo.width * rectInfo.height * 3, 255); // all white
+          for (let y = minY; y <= maxY; y++) {
+            for (let x = minX; x <= maxX; x++) {
+              const idx = (y * rectInfo.width + x) * 3;
+              rectCanvas[idx] = 0;     // R = black
+              rectCanvas[idx + 1] = 0; // G = black
+              rectCanvas[idx + 2] = 0; // B = black
+            }
+          }
+          maskResized = await sharp(rectCanvas, { raw: { width: rectInfo.width, height: rectInfo.height, channels: 3 } })
+            .png()
+            .toBuffer();
+          console.log('[bed-edge] Square mode: converted mask to bounding rectangle (%d,%d)-(%d,%d)', minX, minY, maxX, maxY);
+        }
+      }
+
       // Create an annotated photo with the mask boundary drawn as a bright overlay
       // This helps Gemini visually see exactly where the new bed edge should be
       // 1. Create a semi-transparent colored overlay from the mask (black areas become colored)
