@@ -1,720 +1,489 @@
 // ═══════════════════════════════════════════════════════════════════
 // FILO — PDF Generation Engine
-// Generates: Submittal Documents, Customer Estimates, Internal BOMs
-// Uses: Puppeteer (submittal PDFs) + PDFKit (estimate PDFs)
+// Generates: Submittal Documents (PDFKit only, no Puppeteer)
 // All client-facing documents are WHITE-LABELED (no FILO branding)
 // ═══════════════════════════════════════════════════════════════════
 
-import puppeteer from 'puppeteer';
 import PDFDocument from 'pdfkit';
-import fs from 'fs';
-import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
+import sharp from 'sharp';
 
-// ─── Configuration ───────────────────────────────────────────────
+// ─── Image Fetch Helper ─────────────────────────────────────────
 
-const PDF_CONFIG = {
-  tempDir: process.env.PDF_TEMP_DIR || '/tmp/filo-pdfs',
-  chromiumPath: process.env.CHROMIUM_PATH || null, // auto-detect
-  defaultFont: 'Helvetica',
-  brandFont: 'Helvetica-Bold',
-};
+async function fetchImageBuffer(url, maxWidth = 800, maxHeight = 800) {
+  if (!url) return null;
+  try {
+    let buffer;
+    if (url.startsWith('data:')) {
+      const b64 = url.replace(/^data:image\/[^;]+;base64,/, '');
+      buffer = Buffer.from(b64, 'base64');
+    } else {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const resp = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (!resp.ok) return null;
+      buffer = Buffer.from(await resp.arrayBuffer());
+    }
+    // Normalize to PNG via sharp, resize if needed
+    return await sharp(buffer)
+      .resize(maxWidth, maxHeight, { fit: 'inside', withoutEnlargement: true })
+      .png()
+      .toBuffer();
+  } catch (err) {
+    console.warn('[pdf-engine] Image fetch failed:', url?.substring(0, 60), err.message);
+    return null;
+  }
+}
 
-// Ensure temp directory exists
-if (!fs.existsSync(PDF_CONFIG.tempDir)) {
-  fs.mkdirSync(PDF_CONFIG.tempDir, { recursive: true });
+// ─── Color Helpers ──────────────────────────────────────────────
+
+function hexToRGB(hex) {
+  const h = (hex || '#1a3a2a').replace('#', '');
+  return [parseInt(h.substring(0, 2), 16), parseInt(h.substring(2, 4), 16), parseInt(h.substring(4, 6), 16)];
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// SUBMITTAL PDF GENERATOR (Puppeteer — HTML → PDF)
+// SUBMITTAL PDF GENERATOR
 // ═══════════════════════════════════════════════════════════════════
 
 export class SubmittalPDFGenerator {
-  constructor(db, s3) {
+  constructor(db, supaStorage) {
     this.db = db;
-    this.s3 = s3;
+    this.supaStorage = supaStorage;
   }
 
-  async generate(submittalId) {
-    // Load all data
+  async generate(submittalId, companyId, options = {}) {
+    console.log(`[pdf-engine] Generating submittal PDF for ${submittalId}`);
+
+    // ─── 1. Load all data ─────────────────────────────────────────
     const submittal = await this.db.getOne('SELECT * FROM submittals WHERE id = $1', [submittalId]);
+    if (!submittal) throw new Error('Submittal not found');
+    if (submittal.company_id !== companyId) throw new Error('Unauthorized');
+
     const project = await this.db.getOne(
-      `SELECT p.*, c.display_name as client_name, c.address_line1 as client_address,
-              c.city as client_city, c.state as client_state, c.zip as client_zip
-       FROM projects p JOIN clients c ON c.id = p.client_id WHERE p.id = $1`,
+      `SELECT p.*, c.first_name, c.last_name, c.email as client_email, c.phone as client_phone,
+              c.address, c.city, c.state, c.zip
+       FROM projects p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = $1`,
       [submittal.project_id]
     );
-    const company = await this.db.getOne('SELECT * FROM companies WHERE id = $1', [submittal.company_id]);
+
+    const company = await this.db.getOne('SELECT * FROM companies WHERE id = $1', [companyId]);
+
     const plantProfiles = await this.db.getMany(
-      'SELECT * FROM submittal_plant_profiles WHERE submittal_id = $1 ORDER BY sort_order', [submittalId]
+      `SELECT * FROM submittal_plant_profiles WHERE submittal_id = $1 ORDER BY sort_order, plant_name`,
+      [submittalId]
     );
 
-    // Get before/after photos
-    const areas = await this.db.getMany('SELECT * FROM property_areas WHERE project_id = $1', [project.id]);
-    const photos = [];
-    const renderings = [];
-    for (const area of areas) {
-      const areaPhotos = await this.db.getMany(
-        'SELECT f.cdn_url, f.original_name FROM photos p JOIN files f ON f.id = p.file_id WHERE p.property_area_id = $1 LIMIT 1',
-        [area.id]
-      );
-      if (areaPhotos.length) photos.push(areaPhotos[0]);
+    // Get design render URL — prefer the one passed in (from frontend state), fall back to project row
+    const renderUrl = options.designRenderUrl || project?.render_url || project?.design_render_url || null;
 
-      const design = await this.db.getOne(
-        'SELECT rendering_url FROM designs WHERE property_area_id = $1 AND is_current = true', [area.id]
-      );
-      if (design?.rendering_url) renderings.push({ url: design.rendering_url, area: area.area_type });
+    // ─── 2. Pre-fetch images ──────────────────────────────────────
+    const logoBuffer = await fetchImageBuffer(company?.logo_url, 300, 120);
+    const renderBuffer = await fetchImageBuffer(renderUrl, 1200, 900);
+
+    const plantImageBuffers = {};
+    for (const pp of plantProfiles) {
+      if (pp.image_url) {
+        plantImageBuffers[pp.id] = await fetchImageBuffer(pp.image_url, 250, 250);
+      }
     }
 
-    // Build HTML
-    const html = this.buildSubmittalHTML({
-      company,
-      project,
-      submittal,
-      plantProfiles,
-      photos,
-      renderings,
+    // ─── 3. Build PDF ─────────────────────────────────────────────
+    const primaryColor = hexToRGB(company?.submittal_primary_color || '#1a3a2a');
+    const accentColor = hexToRGB(company?.submittal_accent_color || '#2d6a4f');
+
+    const clientName = project?.first_name && project?.last_name
+      ? `${project.first_name} ${project.last_name}`
+      : project?.project_name || 'Valued Client';
+
+    const clientAddress = [project?.address, project?.city, project?.state, project?.zip]
+      .filter(Boolean).join(', ') || '';
+
+    const companyName = company?.name || 'Landscape Company';
+    const tagline = company?.tagline || '';
+    const credentials = company?.credentials || '';
+    const phone = company?.phone || '';
+    const email = company?.email || '';
+    const website = company?.website || '';
+    const contactLine = [phone, email, website].filter(Boolean).join(' | ');
+
+    const doc = new PDFDocument({
+      size: 'letter',
+      margins: { top: 50, bottom: 60, left: 55, right: 55 },
+      bufferPages: true,
+      info: {
+        Title: `Landscape Submittal - ${clientName}`,
+        Author: companyName,
+        Creator: 'FILO Design Software',
+      },
     });
 
-    // Render to PDF via Puppeteer
-    const pdfPath = path.join(PDF_CONFIG.tempDir, `submittal-${submittalId}-${uuidv4()}.pdf`);
+    // Collect PDF as buffer
+    const chunks = [];
+    doc.on('data', chunk => chunks.push(chunk));
 
-    let browser;
-    try {
-      browser = await puppeteer.launch({
-        headless: 'new',
-        executablePath: PDF_CONFIG.chromiumPath || undefined,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-      });
+    const pdfReady = new Promise((resolve, reject) => {
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+    });
 
-      const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 });
-      await page.pdf({
-        path: pdfPath,
-        format: 'Letter',
-        printBackground: true,
-        margin: { top: '0.5in', bottom: '0.75in', left: '0.6in', right: '0.6in' },
-        displayHeaderFooter: true,
-        footerTemplate: `<div style="width:100%;text-align:center;font-size:9px;color:#999;font-family:Helvetica,sans-serif;">
-          <span class="pageNumber"></span> of <span class="totalPages"></span>
-        </div>`,
-        headerTemplate: '<div></div>',
-      });
+    // ─── PAGE 1: Cover ────────────────────────────────────────────
+    this.buildCoverPage(doc, {
+      logoBuffer, companyName, tagline, credentials,
+      clientName, clientAddress, contactLine, phone, email, website,
+      primaryColor, accentColor,
+    });
 
-      await browser.close();
-      browser = null;
+    // ─── PAGE 2: Design Narrative ─────────────────────────────────
+    doc.addPage();
+    this.addHeader(doc, companyName, tagline, primaryColor, logoBuffer);
+    this.buildNarrativePage(doc, submittal.scope_narrative || '', primaryColor);
+    this.addFooter(doc, contactLine, 2);
 
-      // Upload to S3
-      const s3Key = `${company.id}/submittals/${submittalId}.pdf`;
-      const pdfBuffer = fs.readFileSync(pdfPath);
+    // ─── PAGE 3: Design Rendering ─────────────────────────────────
+    doc.addPage();
+    this.addHeader(doc, companyName, tagline, primaryColor, logoBuffer);
+    this.buildRenderingPage(doc, renderBuffer, primaryColor);
+    this.addFooter(doc, contactLine, 3);
 
-      await this.s3.upload({
-        Bucket: process.env.S3_BUCKET,
-        Key: s3Key,
-        Body: pdfBuffer,
-        ContentType: 'application/pdf',
-      }).promise();
+    // ─── PAGES 4+: Plant Selections ───────────────────────────────
+    let pageNum = 4;
+    doc.addPage();
+    this.addHeader(doc, companyName, tagline, primaryColor, logoBuffer);
 
-      const cdnUrl = `https://${process.env.S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
+    doc.fontSize(22).font('Helvetica-Bold').fillColor(primaryColor);
+    doc.text('Plant Selections', 55, doc.y);
+    doc.moveDown(0.3);
+    doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor(accentColor).lineWidth(1.5).stroke();
+    doc.moveDown(0.8);
 
-      // Save file record
-      const file = await this.db.getOne(
-        `INSERT INTO files (company_id, file_type, original_name, s3_key, s3_bucket, cdn_url, mime_type, file_size)
-         VALUES ($1, 'submittal_pdf', $2, $3, $4, $5, 'application/pdf', $6) RETURNING *`,
-        [company.id, `Submittal_${project.project_number}.pdf`, s3Key, process.env.S3_BUCKET, cdnUrl, pdfBuffer.length]
-      );
+    for (let i = 0; i < plantProfiles.length; i++) {
+      const pp = plantProfiles[i];
+      const imgBuf = plantImageBuffers[pp.id] || null;
 
-      // Update submittal record
-      await this.db.query(
-        'UPDATE submittals SET pdf_file_id = $1, pdf_url = $2 WHERE id = $3',
-        [file.id, cdnUrl, submittalId]
-      );
-
-      // Cleanup temp file
-      fs.unlinkSync(pdfPath);
-
-      return { success: true, pdfUrl: cdnUrl, fileId: file.id, size: pdfBuffer.length };
-    } catch (err) {
-      if (browser) await browser.close();
-      if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
-      console.error('[PDF:submittal] Generation failed:', err);
-      return { success: false, error: err.message };
-    }
-  }
-
-  buildSubmittalHTML({ company, project, submittal, plantProfiles, photos, renderings }) {
-    const logoHtml = company.logo_url
-      ? `<img src="${company.logo_url}" alt="${company.name}" style="max-height:80px;max-width:300px;">`
-      : `<div style="font-family:'Georgia',serif;font-size:28px;font-weight:bold;color:#1a3a2a;">${company.name}</div>`;
-
-    const plantCards = plantProfiles.map(p => `
-      <div class="plant-card">
-        ${p.image_url ? `<img src="${p.image_url}" alt="${p.plant_name}" class="plant-img">` : '<div class="plant-img-placeholder"></div>'}
-        <div class="plant-info">
-          <h3>${p.plant_name}</h3>
-          <p class="poetic">${p.poetic_desc || ''}</p>
-          <div class="plant-details">
-            ${p.bloom_info ? `<span>Bloom: ${p.bloom_info}</span>` : ''}
-            ${p.sun_info ? `<span>Sun: ${p.sun_info.replace(/_/g, ' ')}</span>` : ''}
-            ${p.water_info ? `<span>Water: ${p.water_info}</span>` : ''}
-          </div>
-        </div>
-      </div>
-    `).join('');
-
-    const beforeAfterHtml = photos.map((photo, i) => `
-      <div class="before-after">
-        <div class="ba-panel">
-          <h4>Before</h4>
-          <img src="${photo.cdn_url}" alt="Before">
-        </div>
-        ${renderings[i] ? `<div class="ba-panel">
-          <h4>After</h4>
-          <img src="${renderings[i].url}" alt="After">
-        </div>` : ''}
-      </div>
-    `).join('');
-
-    return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  @page { size: letter; margin: 0; }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #333; line-height: 1.6; }
-
-  /* Cover Page */
-  .cover { height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; background: linear-gradient(180deg, #f8fdf9 0%, #eef7f0 100%); page-break-after: always; padding: 60px; }
-  .cover .logo { margin-bottom: 60px; }
-  .cover h1 { font-family: Georgia, serif; font-size: 36px; color: #1a3a2a; margin-bottom: 12px; }
-  .cover .subtitle { font-size: 18px; color: #666; margin-bottom: 40px; }
-  .cover .meta { font-size: 14px; color: #888; }
-  .cover .meta div { margin-bottom: 4px; }
-  .cover .divider { width: 80px; height: 2px; background: #2d6a4f; margin: 30px auto; }
-
-  /* Section Pages */
-  .section { page-break-before: always; padding: 40px 0; }
-  .section:first-of-type { page-break-before: avoid; }
-  h2 { font-family: Georgia, serif; font-size: 24px; color: #1a3a2a; margin-bottom: 20px; padding-bottom: 8px; border-bottom: 2px solid #2d6a4f; }
-  p { font-size: 13px; margin-bottom: 12px; }
-
-  /* Scope Narrative */
-  .narrative { font-size: 14px; line-height: 1.8; color: #444; text-align: justify; }
-
-  /* Plant Profiles */
-  .plant-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  .plant-card { display: flex; gap: 14px; padding: 14px; border: 1px solid #e0e8e2; border-radius: 8px; background: #fcfefb; }
-  .plant-img { width: 100px; height: 100px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
-  .plant-img-placeholder { width: 100px; height: 100px; background: #e8f0ea; border-radius: 6px; flex-shrink: 0; }
-  .plant-info h3 { font-size: 14px; color: #1a3a2a; margin-bottom: 4px; }
-  .plant-info .poetic { font-style: italic; font-size: 12px; color: #666; margin-bottom: 6px; }
-  .plant-details { display: flex; flex-wrap: wrap; gap: 6px; }
-  .plant-details span { font-size: 10px; background: #e8f0ea; color: #2d6a4f; padding: 2px 8px; border-radius: 10px; }
-
-  /* Before/After */
-  .before-after { display: flex; gap: 16px; margin-bottom: 20px; }
-  .ba-panel { flex: 1; }
-  .ba-panel h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #888; margin-bottom: 8px; }
-  .ba-panel img { width: 100%; border-radius: 6px; border: 1px solid #ddd; }
-
-  /* Closing */
-  .closing { text-align: center; padding: 40px 20px; }
-  .closing .company-name { font-family: Georgia, serif; font-size: 20px; color: #1a3a2a; margin-bottom: 8px; }
-  .closing .contact { font-size: 13px; color: #666; }
-</style>
-</head>
-<body>
-
-<!-- COVER PAGE -->
-<div class="cover">
-  <div class="logo">${logoHtml}</div>
-  <h1>${submittal.cover_title || 'Landscape Design Proposal'}</h1>
-  <div class="subtitle">Prepared for ${project.client_name}</div>
-  <div class="divider"></div>
-  <div class="meta">
-    <div>${project.client_address || ''}${project.client_city ? `, ${project.client_city}, ${project.client_state} ${project.client_zip}` : ''}</div>
-    <div>${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</div>
-    <div>Project ${project.project_number}</div>
-  </div>
-</div>
-
-<!-- SCOPE OF WORK -->
-<div class="section">
-  <h2>Scope of Work</h2>
-  <div class="narrative">${(submittal.scope_narrative || '').split('\n').map(p => `<p>${p}</p>`).join('')}</div>
-</div>
-
-<!-- PLANT PROFILES -->
-${plantProfiles.length > 0 ? `
-<div class="section">
-  <h2>Plant Selections</h2>
-  <div class="plant-grid">${plantCards}</div>
-</div>
-` : ''}
-
-<!-- BEFORE & AFTER -->
-${photos.length > 0 ? `
-<div class="section">
-  <h2>Design Visualization</h2>
-  ${beforeAfterHtml}
-</div>
-` : ''}
-
-<!-- CLOSING PAGE -->
-<div class="section closing">
-  <div class="divider" style="margin:0 auto 30px;"></div>
-  <div class="company-name">${company.name}</div>
-  <div class="contact">
-    ${company.phone ? `<div>${company.phone}</div>` : ''}
-    ${company.email ? `<div>${company.email}</div>` : ''}
-    ${company.website ? `<div>${company.website}</div>` : ''}
-    ${company.address_line1 ? `<div>${company.address_line1}, ${company.city}, ${company.state} ${company.zip}</div>` : ''}
-  </div>
-  ${company.license_number ? `<div style="margin-top:20px;font-size:11px;color:#999;">License #${company.license_number}</div>` : ''}
-  ${submittal.closing_notes ? `<div style="margin-top:30px;font-size:13px;color:#555;">${submittal.closing_notes}</div>` : ''}
-  ${company.warranty_terms ? `<div style="margin-top:20px;font-size:11px;color:#888;text-align:left;"><strong>Warranty:</strong> ${company.warranty_terms}</div>` : ''}
-  ${company.default_terms ? `<div style="margin-top:12px;font-size:11px;color:#888;text-align:left;"><strong>Terms:</strong> ${company.default_terms}</div>` : ''}
-</div>
-
-</body>
-</html>`;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// ESTIMATE PDF GENERATOR (PDFKit — faster, no browser needed)
-// ═══════════════════════════════════════════════════════════════════
-
-export class EstimatePDFGenerator {
-  constructor(db, s3) {
-    this.db = db;
-    this.s3 = s3;
-  }
-
-  async generate(estimateId, type = 'customer') {
-    const estimate = await this.db.getOne('SELECT * FROM estimates WHERE id = $1', [estimateId]);
-    const project = await this.db.getOne(
-      `SELECT p.*, c.display_name as client_name, c.email as client_email,
-              c.phone as client_phone, c.address_line1, c.city, c.state, c.zip
-       FROM projects p JOIN clients c ON c.id = p.client_id WHERE p.id = $1`,
-      [estimate.project_id]
-    );
-    const company = await this.db.getOne('SELECT * FROM companies WHERE id = $1', [estimate.company_id]);
-    const lineItems = await this.db.getMany(
-      'SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [estimateId]
-    );
-
-    const isInternal = type === 'bom';
-    const pdfPath = path.join(PDF_CONFIG.tempDir, `${type}-${estimateId}-${uuidv4()}.pdf`);
-
-    return new Promise(async (resolve, reject) => {
-      try {
-        const doc = new PDFDocument({
-          size: 'LETTER',
-          margins: { top: 50, bottom: 70, left: 50, right: 50 },
-          info: {
-            Title: isInternal ? `BOM - ${project.project_number}` : `Estimate - ${project.project_number}`,
-            Author: company.name,
-          },
-        });
-
-        const stream = fs.createWriteStream(pdfPath);
-        doc.pipe(stream);
-
-        const pageWidth = 512; // 612 - 50 - 50
-        const green = '#1a3a2a';
-        const lightGreen = '#2d6a4f';
-
-        // ─── Header ──────────────────────────────────────────────
-        doc.fontSize(20).font('Helvetica-Bold').fillColor(green).text(company.name, 50, 50);
-        doc.fontSize(9).font('Helvetica').fillColor('#666');
-        if (company.phone) doc.text(company.phone, { continued: company.email ? true : false });
-        if (company.email) doc.text(`  |  ${company.email}`);
-        if (company.address_line1) doc.text(`${company.address_line1}, ${company.city}, ${company.state} ${company.zip}`);
-        if (company.license_number) doc.text(`License #${company.license_number}`);
-
-        doc.moveTo(50, doc.y + 10).lineTo(562, doc.y + 10).strokeColor(lightGreen).lineWidth(1.5).stroke();
-        doc.moveDown(1.5);
-
-        // ─── Title ───────────────────────────────────────────────
-        doc.fontSize(16).font('Helvetica-Bold').fillColor(green)
-          .text(isInternal ? 'Bill of Materials (Internal)' : 'Landscape Estimate');
+      // Check if we need a new page (need ~200pt for a plant card)
+      if (doc.y > 560) {
+        this.addFooter(doc, contactLine, pageNum);
+        pageNum++;
+        doc.addPage();
+        this.addHeader(doc, companyName, tagline, primaryColor, logoBuffer);
+        doc.fontSize(22).font('Helvetica-Bold').fillColor(primaryColor);
+        doc.text('Plant Selections', 55, doc.y);
         doc.moveDown(0.3);
-
-        doc.fontSize(10).font('Helvetica').fillColor('#333');
-        doc.text(`Project: ${project.project_number}`, { continued: true });
-        doc.text(`    Date: ${new Date().toLocaleDateString('en-US')}`, { align: 'right' });
-        doc.moveDown(0.5);
-
-        // Client info
-        doc.fontSize(10).font('Helvetica-Bold').text('Prepared For:');
-        doc.font('Helvetica').text(project.client_name);
-        if (project.address_line1) doc.text(`${project.address_line1}, ${project.city}, ${project.state} ${project.zip}`);
-        if (project.client_phone) doc.text(project.client_phone);
-        if (project.client_email) doc.text(project.client_email);
-        doc.moveDown(1);
-
-        // ─── Line Items Table ────────────────────────────────────
-        const colWidths = isInternal
-          ? { desc: 200, qty: 50, unit: 50, cost: 70, markup: 60, price: 82 }
-          : { desc: 260, qty: 60, unit: 60, price: 70, total: 62 };
-
-        // Table header
-        const tableTop = doc.y;
-        doc.rect(50, tableTop, pageWidth, 22).fill(lightGreen);
-        doc.fontSize(9).font('Helvetica-Bold').fillColor('white');
-
-        if (isInternal) {
-          doc.text('Description', 54, tableTop + 6, { width: colWidths.desc });
-          doc.text('Qty', 54 + colWidths.desc, tableTop + 6, { width: colWidths.qty, align: 'center' });
-          doc.text('Unit', 54 + colWidths.desc + colWidths.qty, tableTop + 6, { width: colWidths.unit, align: 'center' });
-          doc.text('Cost', 54 + colWidths.desc + colWidths.qty + colWidths.unit, tableTop + 6, { width: colWidths.cost, align: 'right' });
-          doc.text('Markup', 54 + colWidths.desc + colWidths.qty + colWidths.unit + colWidths.cost, tableTop + 6, { width: colWidths.markup, align: 'right' });
-          doc.text('Total', 54 + colWidths.desc + colWidths.qty + colWidths.unit + colWidths.cost + colWidths.markup, tableTop + 6, { width: colWidths.price, align: 'right' });
-        } else {
-          doc.text('Description', 54, tableTop + 6, { width: colWidths.desc });
-          doc.text('Qty', 54 + colWidths.desc, tableTop + 6, { width: colWidths.qty, align: 'center' });
-          doc.text('Unit', 54 + colWidths.desc + colWidths.qty, tableTop + 6, { width: colWidths.unit, align: 'center' });
-          doc.text('Price', 54 + colWidths.desc + colWidths.qty + colWidths.unit, tableTop + 6, { width: colWidths.price, align: 'right' });
-          doc.text('Total', 54 + colWidths.desc + colWidths.qty + colWidths.unit + colWidths.price, tableTop + 6, { width: colWidths.total, align: 'right' });
-        }
-
-        let y = tableTop + 26;
-        const fmt = (n) => `$${parseFloat(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-        // Group line items by category
-        const categories = {};
-        for (const li of lineItems) {
-          if (!li.is_visible && !isInternal) continue;
-          const cat = li.category || 'other';
-          if (!categories[cat]) categories[cat] = [];
-          categories[cat].push(li);
-        }
-
-        const categoryLabels = {
-          plant_material: 'Plant Material', labor: 'Labor', soil_amendment: 'Soil Amendments',
-          mulch: 'Mulch', edging: 'Edging & Borders', irrigation: 'Irrigation',
-          lighting: 'Landscape Lighting', hardscape: 'Hardscape', delivery: 'Delivery',
-          removal_disposal: 'Removal & Disposal', warranty: 'Warranty', tax: 'Tax', other: 'Other',
-        };
-
-        for (const [cat, items] of Object.entries(categories)) {
-          // Check for page break
-          if (y > 680) {
-            doc.addPage();
-            y = 50;
-          }
-
-          // Category header
-          doc.rect(50, y, pageWidth, 18).fill('#f0f5f1');
-          doc.fontSize(9).font('Helvetica-Bold').fillColor(lightGreen)
-            .text(categoryLabels[cat] || cat, 54, y + 4);
-          y += 22;
-
-          for (const li of items) {
-            if (y > 700) {
-              doc.addPage();
-              y = 50;
-            }
-
-            const isEven = items.indexOf(li) % 2 === 0;
-            if (isEven) doc.rect(50, y - 2, pageWidth, 16).fill('#fafcfa');
-
-            doc.fontSize(9).font('Helvetica').fillColor('#333');
-            doc.text(li.description, 54, y, { width: isInternal ? colWidths.desc : colWidths.desc });
-            doc.text(String(parseFloat(li.quantity)), 54 + (isInternal ? colWidths.desc : colWidths.desc), y, { width: 50, align: 'center' });
-            doc.text(li.unit || 'ea', 54 + (isInternal ? colWidths.desc + colWidths.qty : colWidths.desc + colWidths.qty), y, { width: 50, align: 'center' });
-
-            if (isInternal) {
-              const costBefore = parseFloat(li.unit_price) / (1 + (parseFloat(estimate.material_markup) || 35) / 100);
-              doc.text(fmt(costBefore), 54 + colWidths.desc + colWidths.qty + colWidths.unit, y, { width: colWidths.cost, align: 'right' });
-              doc.text(`${estimate.material_markup || 35}%`, 54 + colWidths.desc + colWidths.qty + colWidths.unit + colWidths.cost, y, { width: colWidths.markup, align: 'right' });
-              doc.text(fmt(li.total_price), 54 + colWidths.desc + colWidths.qty + colWidths.unit + colWidths.cost + colWidths.markup, y, { width: colWidths.price, align: 'right' });
-            } else {
-              doc.text(fmt(li.unit_price), 54 + colWidths.desc + colWidths.qty + colWidths.unit, y, { width: colWidths.price, align: 'right' });
-              doc.text(fmt(li.total_price), 54 + colWidths.desc + colWidths.qty + colWidths.unit + colWidths.price, y, { width: colWidths.total, align: 'right' });
-            }
-
-            y += 16;
-          }
-          y += 6;
-        }
-
-        // ─── Totals ──────────────────────────────────────────────
-        y += 8;
-        doc.moveTo(350, y).lineTo(562, y).strokeColor('#ccc').lineWidth(0.5).stroke();
-        y += 8;
-
-        doc.fontSize(10).font('Helvetica').fillColor('#333');
-        doc.text('Subtotal:', 350, y, { width: 130, align: 'right' });
-        doc.font('Helvetica-Bold').text(fmt(estimate.subtotal), 485, y, { width: 77, align: 'right' });
-        y += 18;
-
-        if (estimate.tax_enabled && parseFloat(estimate.tax_amount) > 0) {
-          doc.font('Helvetica').text(`Tax (${(parseFloat(estimate.tax_rate) * 100).toFixed(2)}%):`, 350, y, { width: 130, align: 'right' });
-          doc.font('Helvetica-Bold').text(fmt(estimate.tax_amount), 485, y, { width: 77, align: 'right' });
-          y += 18;
-        }
-
-        doc.moveTo(350, y).lineTo(562, y).strokeColor(lightGreen).lineWidth(2).stroke();
-        y += 8;
-        doc.fontSize(14).font('Helvetica-Bold').fillColor(green);
-        doc.text('Total:', 350, y, { width: 130, align: 'right' });
-        doc.text(fmt(estimate.total), 485, y, { width: 77, align: 'right' });
-        y += 30;
-
-        // ─── Terms ───────────────────────────────────────────────
-        if (!isInternal && (estimate.terms || estimate.warranty)) {
-          if (y > 600) { doc.addPage(); y = 50; }
-          doc.fontSize(8).font('Helvetica').fillColor('#888');
-          if (estimate.terms) {
-            doc.font('Helvetica-Bold').text('Terms & Conditions:', 50, y);
-            y += 12;
-            doc.font('Helvetica').text(estimate.terms, 50, y, { width: pageWidth });
-            y = doc.y + 12;
-          }
-          if (estimate.warranty) {
-            doc.font('Helvetica-Bold').text('Warranty:', 50, y);
-            y += 12;
-            doc.font('Helvetica').text(estimate.warranty, 50, y, { width: pageWidth });
-            y = doc.y + 12;
-          }
-        }
-
-        // ─── Signature Line (Customer Estimate Only) ─────────────
-        if (!isInternal) {
-          if (y > 620) { doc.addPage(); y = 50; }
-          y += 30;
-          doc.fontSize(10).font('Helvetica-Bold').fillColor('#333').text('Acceptance', 50, y);
-          y += 20;
-          doc.fontSize(9).font('Helvetica').fillColor('#555')
-            .text('By signing below, I authorize the work described in this estimate.', 50, y);
-          y += 30;
-
-          doc.moveTo(50, y).lineTo(300, y).strokeColor('#333').lineWidth(0.5).stroke();
-          doc.text('Signature', 50, y + 4, { width: 250 });
-
-          doc.moveTo(330, y).lineTo(500, y).strokeColor('#333').lineWidth(0.5).stroke();
-          doc.text('Date', 330, y + 4, { width: 170 });
-
-          y += 30;
-          doc.moveTo(50, y).lineTo(300, y).strokeColor('#333').lineWidth(0.5).stroke();
-          doc.text('Printed Name', 50, y + 4, { width: 250 });
-        }
-
-        doc.end();
-
-        stream.on('finish', async () => {
-          try {
-            const pdfBuffer = fs.readFileSync(pdfPath);
-            const fileType = isInternal ? 'estimate_pdf' : 'estimate_pdf';
-            const fileName = isInternal
-              ? `BOM_${project.project_number}.pdf`
-              : `Estimate_${project.project_number}.pdf`;
-            const s3Key = `${company.id}/estimates/${estimateId}-${type}.pdf`;
-
-            await this.s3.upload({
-              Bucket: process.env.S3_BUCKET,
-              Key: s3Key,
-              Body: pdfBuffer,
-              ContentType: 'application/pdf',
-            }).promise();
-
-            const cdnUrl = `https://${process.env.S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
-
-            const file = await this.db.getOne(
-              `INSERT INTO files (company_id, file_type, original_name, s3_key, s3_bucket, cdn_url, mime_type, file_size)
-               VALUES ($1, $2, $3, $4, $5, $6, 'application/pdf', $7) RETURNING *`,
-              [company.id, fileType, fileName, s3Key, process.env.S3_BUCKET, cdnUrl, pdfBuffer.length]
-            );
-
-            const updateField = isInternal ? 'bom_pdf_file_id' : 'pdf_file_id';
-            await this.db.query(`UPDATE estimates SET ${updateField} = $1 WHERE id = $2`, [file.id, estimateId]);
-
-            fs.unlinkSync(pdfPath);
-            resolve({ success: true, pdfUrl: cdnUrl, fileId: file.id, type });
-          } catch (uploadErr) {
-            if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
-            reject(uploadErr);
-          }
-        });
-
-        stream.on('error', (err) => {
-          if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
-          reject(err);
-        });
-      } catch (err) {
-        if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
-        reject(err);
+        doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor(accentColor).lineWidth(1.5).stroke();
+        doc.moveDown(0.8);
       }
+
+      this.buildPlantCard(doc, pp, imgBuf, primaryColor, accentColor);
+    }
+    this.addFooter(doc, contactLine, pageNum);
+    pageNum++;
+
+    // ─── LAST PAGE: Thank You ─────────────────────────────────────
+    doc.addPage();
+    this.buildThankYouPage(doc, {
+      companyName, tagline, credentials, phone, email, website,
+      primaryColor, accentColor, contactLine, logoBuffer,
     });
+
+    doc.end();
+
+    // ─── 4. Upload to Supabase ────────────────────────────────────
+    const pdfBuffer = await pdfReady;
+    console.log(`[pdf-engine] PDF generated: ${Math.round(pdfBuffer.length / 1024)} KB, uploading...`);
+
+    const storageKey = `${companyId}/submittals/${submittalId}.pdf`;
+    const uploadResult = await this.supaStorage.upload(storageKey, pdfBuffer, 'application/pdf');
+    const pdfUrl = this.supaStorage.getPublicUrl(storageKey);
+
+    // Update submittal record
+    await this.db.query(
+      'UPDATE submittals SET pdf_url = $1, updated_at = NOW() WHERE id = $2',
+      [pdfUrl, submittalId]
+    );
+
+    console.log(`[pdf-engine] Submittal PDF uploaded: ${pdfUrl}`);
+    return { success: true, pdfUrl };
+  }
+
+  // ─── Cover Page ───────────────────────────────────────────────
+
+  buildCoverPage(doc, opts) {
+    const { logoBuffer, companyName, tagline, credentials, clientName, clientAddress,
+            contactLine, phone, email, website, primaryColor, accentColor } = opts;
+
+    const pageW = 612;
+    const centerX = pageW / 2;
+
+    // Company logo or name
+    let y = 160;
+    if (logoBuffer) {
+      try {
+        doc.image(logoBuffer, centerX - 100, y, { width: 200, align: 'center' });
+        y += 100;
+      } catch (e) {
+        doc.fontSize(36).font('Helvetica-Bold').fillColor(primaryColor);
+        doc.text(companyName, 55, y, { align: 'center', width: pageW - 110 });
+        y = doc.y + 8;
+      }
+    } else {
+      doc.fontSize(36).font('Helvetica-Bold').fillColor(primaryColor);
+      doc.text(companyName, 55, y, { align: 'center', width: pageW - 110 });
+      y = doc.y + 8;
+    }
+
+    // Tagline
+    if (tagline) {
+      doc.fontSize(14).font('Helvetica').fillColor([120, 120, 120]);
+      doc.text(tagline, 55, y, { align: 'center', width: pageW - 110 });
+      y = doc.y + 24;
+    } else {
+      y += 16;
+    }
+
+    // Decorative rule
+    doc.moveTo(centerX - 60, y).lineTo(centerX + 60, y)
+      .strokeColor(accentColor).lineWidth(2).stroke();
+    y += 32;
+
+    // Title
+    doc.fontSize(26).font('Helvetica-Bold').fillColor(primaryColor);
+    doc.text('Landscape Submittal Package', 55, y, { align: 'center', width: pageW - 110 });
+    y = doc.y + 28;
+
+    // Prepared for
+    doc.fontSize(14).font('Helvetica').fillColor([120, 120, 120]);
+    doc.text('Prepared for', 55, y, { align: 'center', width: pageW - 110 });
+    y = doc.y + 6;
+
+    doc.fontSize(20).font('Helvetica-Bold').fillColor(primaryColor);
+    doc.text(clientName, 55, y, { align: 'center', width: pageW - 110 });
+    y = doc.y + 6;
+
+    if (clientAddress) {
+      doc.fontSize(13).font('Helvetica').fillColor([100, 100, 100]);
+      doc.text(clientAddress, 55, y, { align: 'center', width: pageW - 110 });
+      y = doc.y + 6;
+    }
+
+    // Date
+    y += 12;
+    const dateStr = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    doc.fontSize(13).font('Helvetica').fillColor([120, 120, 120]);
+    doc.text(dateStr, 55, y, { align: 'center', width: pageW - 110 });
+
+    // Bottom section — credentials + contact
+    if (credentials) {
+      doc.fontSize(10).font('Helvetica').fillColor([130, 130, 130]);
+      doc.text(credentials, 55, 680, { align: 'center', width: pageW - 110 });
+    }
+
+    doc.fontSize(10).font('Helvetica').fillColor([130, 130, 130]);
+    doc.text(contactLine, 55, 700, { align: 'center', width: pageW - 110 });
+  }
+
+  // ─── Header (pages 2+) ───────────────────────────────────────
+
+  addHeader(doc, companyName, tagline, primaryColor, logoBuffer) {
+    const saved = doc.y;
+
+    if (logoBuffer) {
+      try {
+        doc.image(logoBuffer, 55, 30, { height: 28 });
+      } catch (e) {
+        doc.fontSize(14).font('Helvetica-Bold').fillColor(primaryColor);
+        doc.text(companyName, 55, 34);
+      }
+    } else {
+      doc.fontSize(14).font('Helvetica-Bold').fillColor(primaryColor);
+      doc.text(companyName, 55, 34);
+    }
+
+    if (tagline) {
+      doc.fontSize(9).font('Helvetica').fillColor([140, 140, 140]);
+      doc.text(tagline, 300, 38, { align: 'right', width: 257 });
+    }
+
+    doc.moveTo(55, 62).lineTo(557, 62).strokeColor([200, 200, 200]).lineWidth(0.5).stroke();
+    doc.y = 78;
+  }
+
+  // ─── Footer ───────────────────────────────────────────────────
+
+  addFooter(doc, contactLine, pageNum) {
+    doc.moveTo(55, 728).lineTo(557, 728).strokeColor([200, 200, 200]).lineWidth(0.5).stroke();
+    doc.fontSize(8).font('Helvetica').fillColor([150, 150, 150]);
+    doc.text(contactLine, 55, 734, { width: 420 });
+    doc.text(`Page ${pageNum}`, 480, 734, { align: 'right', width: 77 });
+  }
+
+  // ─── Design Narrative Page ────────────────────────────────────
+
+  buildNarrativePage(doc, narrative, primaryColor) {
+    doc.fontSize(22).font('Helvetica-Bold').fillColor(primaryColor);
+    doc.text('Front Yard Design', 55, doc.y);
+    doc.moveDown(0.3);
+    doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor(primaryColor).lineWidth(1.5).stroke();
+    doc.moveDown(0.8);
+
+    if (narrative) {
+      doc.fontSize(11).font('Helvetica').fillColor([50, 50, 50]);
+      const paragraphs = narrative.split(/\n\n+/);
+      for (const para of paragraphs) {
+        if (doc.y > 690) break; // leave room for footer
+        doc.text(para.trim(), 55, doc.y, {
+          width: 502,
+          lineGap: 4,
+          paragraphGap: 2,
+        });
+        doc.moveDown(0.6);
+      }
+    } else {
+      doc.fontSize(12).font('Helvetica').fillColor([150, 150, 150]);
+      doc.text('Design narrative will be generated when the AI design is complete.', 55, doc.y, { width: 502 });
+    }
+  }
+
+  // ─── Design Rendering Page ────────────────────────────────────
+
+  buildRenderingPage(doc, renderBuffer, primaryColor) {
+    doc.fontSize(22).font('Helvetica-Bold').fillColor(primaryColor);
+    doc.text('Front Yard Design Rendering', 55, doc.y);
+    doc.moveDown(0.3);
+    doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor(primaryColor).lineWidth(1.5).stroke();
+    doc.moveDown(0.8);
+
+    if (renderBuffer) {
+      try {
+        const imgY = doc.y;
+        const availWidth = 502;
+        const availHeight = 640 - imgY;
+        doc.image(renderBuffer, 55, imgY, {
+          fit: [availWidth, availHeight],
+          align: 'center',
+          valign: 'center',
+        });
+      } catch (e) {
+        console.warn('[pdf-engine] Failed to embed render image:', e.message);
+        doc.fontSize(13).font('Helvetica').fillColor([150, 150, 150]);
+        doc.text('Design rendering image could not be loaded.', 55, doc.y, { width: 502, align: 'center' });
+      }
+    } else {
+      doc.fontSize(13).font('Helvetica').fillColor([150, 150, 150]);
+      doc.text('Design rendering not yet generated. Complete Step 6 to create the visual design.', 55, doc.y + 100, { width: 502, align: 'center' });
+    }
+  }
+
+  // ─── Plant Card ───────────────────────────────────────────────
+
+  buildPlantCard(doc, plant, imgBuffer, primaryColor, accentColor) {
+    const startY = doc.y;
+    const textX = imgBuffer ? 195 : 55;
+    const textWidth = imgBuffer ? 362 : 502;
+
+    // Plant image on the left
+    if (imgBuffer) {
+      try {
+        doc.image(imgBuffer, 55, startY, { width: 120, height: 120 });
+      } catch (e) {
+        // Placeholder box
+        doc.rect(55, startY, 120, 120).fillColor([240, 240, 240]).fill();
+        doc.fontSize(30).fillColor([180, 180, 180]);
+        doc.text('🌿', 90, startY + 42);
+      }
+    }
+
+    // Plant name + container size
+    const nameText = plant.plant_name || plant.common_name || 'Unknown Plant';
+    const sizeText = plant.container_size ? ` ${plant.container_size}` : '';
+    doc.fontSize(15).font('Helvetica-Bold').fillColor(primaryColor);
+    doc.text(`${nameText}${sizeText}`, textX, startY, { width: textWidth });
+
+    // Quantity
+    const qty = plant.quantity || 1;
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(accentColor);
+    doc.text(`Qty: ${qty}`, textX, doc.y + 2, { width: textWidth });
+
+    // Description
+    const desc = plant.description || plant.poetic_desc || '';
+    if (desc) {
+      doc.moveDown(0.3);
+      doc.fontSize(10).font('Helvetica').fillColor([80, 80, 80]);
+      doc.text(desc, textX, doc.y, { width: textWidth, lineGap: 2 });
+    }
+
+    // Ensure we move past the image height
+    const endY = Math.max(doc.y + 12, startY + (imgBuffer ? 132 : 20));
+    doc.y = endY;
+
+    // Separator line
+    doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor([230, 230, 230]).lineWidth(0.5).stroke();
+    doc.y += 16;
+  }
+
+  // ─── Thank You Page ───────────────────────────────────────────
+
+  buildThankYouPage(doc, opts) {
+    const { companyName, tagline, credentials, phone, email, website,
+            primaryColor, accentColor, contactLine, logoBuffer } = opts;
+
+    const pageW = 612;
+
+    // Centered content
+    let y = 240;
+
+    doc.fontSize(42).font('Helvetica-Bold').fillColor(primaryColor);
+    doc.text('Thank You', 55, y, { align: 'center', width: pageW - 110 });
+    y = doc.y + 16;
+
+    doc.fontSize(15).font('Helvetica').fillColor([100, 100, 100]);
+    doc.text('We look forward to transforming your outdoor space.', 55, y, { align: 'center', width: pageW - 110 });
+    y = doc.y + 32;
+
+    // Decorative rule
+    const cx = pageW / 2;
+    doc.moveTo(cx - 40, y).lineTo(cx + 40, y).strokeColor(accentColor).lineWidth(2).stroke();
+    y += 28;
+
+    doc.fontSize(16).font('Helvetica-Bold').fillColor(primaryColor);
+    doc.text(companyName, 55, y, { align: 'center', width: pageW - 110 });
+    y = doc.y + 6;
+
+    if (phone) {
+      doc.fontSize(12).font('Helvetica').fillColor([100, 100, 100]);
+      doc.text(phone, 55, y, { align: 'center', width: pageW - 110 });
+      y = doc.y + 3;
+    }
+    if (email) {
+      doc.fontSize(12).font('Helvetica').fillColor([100, 100, 100]);
+      doc.text(email, 55, y, { align: 'center', width: pageW - 110 });
+      y = doc.y + 3;
+    }
+    if (website) {
+      doc.fontSize(12).font('Helvetica').fillColor([100, 100, 100]);
+      doc.text(website, 55, y, { align: 'center', width: pageW - 110 });
+      y = doc.y + 3;
+    }
+
+    if (credentials) {
+      y = doc.y + 16;
+      doc.fontSize(10).font('Helvetica').fillColor([140, 140, 140]);
+      doc.text(credentials, 55, y, { align: 'center', width: pageW - 110 });
+    }
+
+    // Footer
+    this.addFooter(doc, contactLine, '');
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// EXPRESS ROUTES
+// EXPORTS
 // ═══════════════════════════════════════════════════════════════════
 
-export function mountPDFRoutes(app, db, s3, authenticate, crmManager) {
-  const submittalPDF = new SubmittalPDFGenerator(db, s3);
-  const estimatePDF = new EstimatePDFGenerator(db, s3);
-
-  // Generate submittal PDF (returns download URL)
-  app.post('/api/submittals/:id/pdf', authenticate, async (req, res) => {
-    try {
-      const result = await submittalPDF.generate(req.params.id);
-      if (result.success) {
-        res.json(result);
-      } else {
-        res.status(500).json(result);
-      }
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Generate + push submittal PDF to CRM in one step
-  app.post('/api/submittals/:id/pdf-and-push', authenticate, async (req, res) => {
-    try {
-      // Generate PDF
-      const pdfResult = await submittalPDF.generate(req.params.id);
-      if (!pdfResult.success) return res.status(500).json(pdfResult);
-
-      // Push to CRM if connected
-      let crmResult = null;
-      if (crmManager) {
-        const submittal = await db.getOne('SELECT * FROM submittals WHERE id = $1', [req.params.id]);
-        const project = await db.getOne('SELECT * FROM projects WHERE id = $1', [submittal.project_id]);
-        crmResult = await crmManager.syncDocument(
-          req.user.companyId,
-          pdfResult.pdfUrl,
-          `Submittal_${project.project_number}.pdf`,
-          project.client_id
-        );
-      }
-
-      res.json({ pdf: pdfResult, crm: crmResult });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Generate estimate PDFs (both customer and BOM)
-  app.post('/api/estimates/:id/pdf', authenticate, async (req, res) => {
-    try {
-      const { type } = req.body; // 'customer' or 'bom'
-      const result = await estimatePDF.generate(req.params.id, type || 'customer');
-      if (result.success) {
-        res.json(result);
-      } else {
-        res.status(500).json(result);
-      }
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Generate both estimate PDFs at once
-  app.post('/api/estimates/:id/pdf/all', authenticate, async (req, res) => {
-    try {
-      const [customer, bom] = await Promise.all([
-        estimatePDF.generate(req.params.id, 'customer'),
-        estimatePDF.generate(req.params.id, 'bom'),
-      ]);
-      res.json({ customer, bom });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Direct download route — generates a presigned S3 URL for immediate download
-  app.get('/api/files/:fileId/download', authenticate, async (req, res) => {
-    try {
-      const file = await db.getOne(
-        'SELECT * FROM files WHERE id = $1 AND company_id = $2',
-        [req.params.fileId, req.user.companyId]
-      );
-      if (!file) return res.status(404).json({ error: 'File not found' });
-
-      const presignedUrl = s3.getSignedUrl('getObject', {
-        Bucket: file.s3_bucket,
-        Key: file.s3_key,
-        Expires: 300, // 5 minutes
-        ResponseContentDisposition: `attachment; filename="${file.original_name}"`,
-      });
-
-      res.json({ downloadUrl: presignedUrl, fileName: file.original_name, expiresIn: 300 });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // Bulk export — download all project documents as individual download links
-  app.get('/api/projects/:projectId/export', authenticate, async (req, res) => {
-    try {
-      const projectId = req.params.projectId;
-
-      // Get all related files
-      const submittals = await db.getMany(
-        'SELECT s.id, s.pdf_url, f.s3_key, f.s3_bucket, f.original_name FROM submittals s LEFT JOIN files f ON f.id = s.pdf_file_id WHERE s.project_id = $1 AND s.is_current = true',
-        [projectId]
-      );
-      const estimates = await db.getMany(
-        'SELECT e.id, f.s3_key, f.s3_bucket, f.original_name, bf.s3_key as bom_key, bf.s3_bucket as bom_bucket, bf.original_name as bom_name FROM estimates e LEFT JOIN files f ON f.id = e.pdf_file_id LEFT JOIN files bf ON bf.id = e.bom_pdf_file_id WHERE e.project_id = $1 AND e.is_current = true',
-        [projectId]
-      );
-      const designs = await db.getMany(
-        'SELECT d.rendering_url FROM designs d WHERE d.project_id = $1 AND d.is_current = true AND d.rendering_url IS NOT NULL',
-        [projectId]
-      );
-      const photos = await db.getMany(
-        `SELECT f.cdn_url, f.original_name FROM photos p JOIN files f ON f.id = p.file_id
-         JOIN property_areas pa ON pa.id = p.property_area_id WHERE pa.project_id = $1`,
-        [projectId]
-      );
-
-      // Generate presigned download URLs for each file
-      const downloads = [];
-
-      for (const s of submittals) {
-        if (s.s3_key) {
-          downloads.push({
-            type: 'submittal',
-            fileName: s.original_name || 'Submittal.pdf',
-            url: s3.getSignedUrl('getObject', { Bucket: s.s3_bucket, Key: s.s3_key, Expires: 3600 }),
-          });
-        }
-      }
-
-      for (const e of estimates) {
-        if (e.s3_key) {
-          downloads.push({
-            type: 'estimate',
-            fileName: e.original_name || 'Estimate.pdf',
-            url: s3.getSignedUrl('getObject', { Bucket: e.s3_bucket, Key: e.s3_key, Expires: 3600 }),
-          });
-        }
-        if (e.bom_key) {
-          downloads.push({
-            type: 'bom',
-            fileName: e.bom_name || 'BOM.pdf',
-            url: s3.getSignedUrl('getObject', { Bucket: e.bom_bucket, Key: e.bom_key, Expires: 3600 }),
-          });
-        }
-      }
-
-      for (const d of designs) {
-        downloads.push({ type: 'rendering', fileName: 'Design_Rendering.png', url: d.rendering_url });
-      }
-
-      for (const p of photos) {
-        downloads.push({ type: 'photo', fileName: p.original_name, url: p.cdn_url });
-      }
-
-      res.json({ projectId, fileCount: downloads.length, downloads });
-    } catch (err) {
-      res.status(500).json({ error: err.message });
-    }
-  });
+export function createPDFEngine(db, supaStorage) {
+  return {
+    submittal: new SubmittalPDFGenerator(db, supaStorage),
+  };
 }
+
+export default { SubmittalPDFGenerator, createPDFEngine };

@@ -233,7 +233,7 @@ app.use(cors({
   ],
   credentials: true,
 }));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 app.use(morgan('combined'));
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
@@ -723,6 +723,7 @@ app.put('/api/company', authenticate, requireAdmin, async (req, res) => {
       'soil_amendment_per_cy', 'mulch_per_cy', 'edging_per_lf', 'removal_base_fee',
       'irrigation_hourly_rate', 'labor_rate_per_gallon', 'labor_rate_per_hour',
       'labor_lump_default', 'tax_enabled', 'tax_rate', 'default_terms', 'warranty_terms',
+      'tagline', 'credentials', 'submittal_primary_color', 'submittal_accent_color', 'logo_url', 'website',
     ];
 
     // Sanitize enum fields — lowercase or null for empty strings
@@ -1066,16 +1067,9 @@ app.post('/api/projects', authenticate, requireActiveSubscription, async (req, r
 
     // Sanitize enum fields — same maps as PUT /api/projects/:id
     const DESIGN_STYLE_MAP = {
-      'formal': 'formal', 'formal / symmetrical': 'formal', 'formal_symmetrical': 'formal',
-      'naturalistic': 'naturalistic', 'naturalistic / cottage': 'naturalistic', 'naturalistic_cottage': 'naturalistic',
-      'modern': 'modern', 'modern / minimalist': 'modern', 'modern_minimalist': 'modern', 'contemporary': 'modern',
-      'tropical': 'tropical',
-      'xeriscape': 'xeriscape', 'desert / xeriscape': 'xeriscape', 'desert_xeriscape': 'xeriscape',
-      'mediterranean': 'mediterranean',
-      'cottage': 'cottage', 'cottage garden': 'cottage',
-      'desert': 'desert', 'southwest': 'desert', 'desert / southwest': 'desert',
-      'farmhouse': 'farmhouse', 'rustic': 'farmhouse', 'farmhouse / rustic': 'farmhouse',
-      'transitional': 'transitional',
+      'symmetrical': 'symmetrical', 'symmetric': 'symmetrical', 'formal': 'symmetrical',
+      'asymmetrical': 'asymmetrical', 'asymmetric': 'asymmetrical', 'naturalistic': 'asymmetrical',
+      'modern': 'modern', 'contemporary': 'modern', 'tropical': 'tropical',
     };
     const SUN_EXPOSURE_MAP = {
       'full_sun': 'full_sun', 'full sun': 'full_sun',
@@ -1150,16 +1144,9 @@ app.put('/api/projects/:id', authenticate, async (req, res) => {
     const fields = req.body;
     // Sanitize enum fields — DB expects exact enum values
     const DESIGN_STYLE_MAP = {
-      'formal': 'formal', 'formal / symmetrical': 'formal', 'formal_symmetrical': 'formal',
-      'naturalistic': 'naturalistic', 'naturalistic / cottage': 'naturalistic', 'naturalistic_cottage': 'naturalistic',
-      'modern': 'modern', 'modern / minimalist': 'modern', 'modern_minimalist': 'modern', 'contemporary': 'modern',
-      'tropical': 'tropical',
-      'xeriscape': 'xeriscape', 'desert / xeriscape': 'xeriscape', 'desert_xeriscape': 'xeriscape',
-      'mediterranean': 'mediterranean',
-      'cottage': 'cottage', 'cottage garden': 'cottage',
-      'desert': 'desert', 'southwest': 'desert', 'desert / southwest': 'desert',
-      'farmhouse': 'farmhouse', 'rustic': 'farmhouse', 'farmhouse / rustic': 'farmhouse',
-      'transitional': 'transitional',
+      'symmetrical': 'symmetrical', 'symmetric': 'symmetrical', 'formal': 'symmetrical',
+      'asymmetrical': 'asymmetrical', 'asymmetric': 'asymmetrical', 'naturalistic': 'asymmetrical',
+      'modern': 'modern', 'contemporary': 'modern', 'tropical': 'tropical',
     };
     const SUN_EXPOSURE_MAP = {
       'full_sun': 'full_sun', 'full sun': 'full_sun',
@@ -1602,7 +1589,18 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
     }
 
     const edgeDesc = edgeStyle === 'square'
-      ? 'perfectly straight lines and exact 90-degree right angles at every corner. Even if the existing bed has curves, convert ALL curves into straight segments meeting at sharp 90° corners. The bed must look like a rectangle or series of rectangles — no curves, no arcs, no rounded transitions anywhere. Think formal garden geometry.'
+      ? `SQUARE 90° EDGES — THIS IS THE #1 MOST IMPORTANT RULE:
+Every single corner of this bed MUST be a PERFECT 90-DEGREE RIGHT ANGLE. No exceptions. No rounding. No softening. No curves whatsoever.
+- ALL edges must be PERFECTLY STRAIGHT LINES — as if cut with a laser against a straightedge ruler.
+- Every corner where two edges meet must form an EXACT 90° right angle — like the corner of a piece of paper.
+- If the existing bed has curves, IGNORE THEM. Convert every curve into straight segments that meet at sharp 90° corners.
+- The bed outline must look like a RECTANGLE, an L-SHAPE, or a series of connected RECTANGLES — geometric shapes ONLY.
+- ZERO curves. ZERO arcs. ZERO radius on corners. ZERO gradual bends. ZERO rounded transitions. Every turn is a sharp 90° snap.
+- The edge should look like a professional hardscape contractor used a string line and a square to cut it.
+- Think: the corner of a building, the edge of a sidewalk, a brick wall corner. That level of geometric precision.
+- If you are tempted to round ANY corner even slightly — DON'T. Make it sharper instead.
+- PAY SPECIAL ATTENTION TO THE END CAPS / TERMINATION POINTS of the bed — where the bed starts and ends. These are the spots most likely to get curved. The ends of the bed must STOP ABRUPTLY with a straight vertical cut line perpendicular to the house wall. The end of the bed is a flat wall of mulch, not a tapered point or rounded nose. Imagine a box was placed at the end — that's the shape. A flat 90° stop, not a rounded taper.
+- The bed outline from above should look like a PERFECT RECTANGLE — flat ends, straight sides, sharp corners. Not a rounded rectangle. Not a stadium shape. A RECTANGLE with ZERO corner radius.`
       : 'smooth flowing curves with natural rounded transitions. Follow the natural contour the user drew (or the existing bed shape). Soften any sharp angles into gentle arcs. The edge should flow like a river — organic and graceful.';
 
     const adjustDesc = !adjustmentFeet || adjustmentFeet === 0
@@ -1646,7 +1644,11 @@ STRICT BED EDGE RESHAPING RULES:
 5. The edge transition must be a clean, crisp, professionally cut steel-edge line — sharp and defined with a slight trench reveal. No gradual fade, no soft blending.
 6. DO NOT modify the house, driveway, sidewalk, fence, trees, or any structure. ONLY reshape the bed-to-lawn boundary.
 7. ⛔ ZERO PLANT CHANGES — Do NOT add ANY new plants. Do NOT remove ANY existing plants. Do NOT move, resize, recolor, or alter ANY vegetation. Every plant, shrub, tree, and blade of grass must remain PIXEL-IDENTICAL to the input photo. The ONLY change is the bed edge shape and the mulch fill.
-8. The result must look like a real photograph with natural lighting and shadows.` });
+8. The result must look like a real photograph with natural lighting and shadows.
+${edgeStyle === 'square' ? `
+⚠️ FINAL CHECK — SQUARE EDGE VERIFICATION:
+Before outputting the image, examine EVERY corner of the bed edge — especially the LEFT END and RIGHT END of the bed where it terminates. These end points are where curves sneak in most often. The ends must be FLAT STRAIGHT CUTS perpendicular to the wall — like the bed was sliced with a knife. No rounding, no tapering, no nose shape. Then check every other corner: every segment must be a perfectly straight line, and every direction change must be an abrupt 90° turn. If ANY corner has even a SLIGHT curve — redraw it as a sharp right angle. The bed outline viewed from above must be a perfect RECTANGLE, not a rounded rectangle. This is non-negotiable.` : ''}` });
+
 
     console.log('[bed-edge] Calling Gemini...');
     let response;
@@ -1779,16 +1781,12 @@ app.post('/api/design-render', authenticate, async (req, res) => {
 
     // Style guide for Gemini render — same master prompts used in GPT-4o plant selection
     const renderStyleGuide = {
-      formal: 'FORMAL LANDSCAPE: Strict symmetry, axial alignment, geometric precision. Tightly clipped hedges forming defined borders. Evenly spaced ornamental trees with uniform canopy. Flower beds minimal and controlled with repeating patterns. Edges crisp and perfectly maintained. Stone urns, balustrades, gravel courts. Mood: disciplined, timeless, authoritative.',
+      symmetrical: 'SYMMETRICAL LAYOUT: Plants must be placed in PERFECTLY MIRRORED, BALANCED arrangements. Use strict geometric spacing — equal distances between every plant of the same species. Arrange plants in clean straight rows, triangular grid patterns, or evenly spaced arcs that mirror from a central axis. If there are 6 roses, place 3 on each side at identical positions. Every grouping must have a matching counterpart on the opposite side. Spacing must be uniform and precise — like a ruler was used. The overall composition should feel orderly, intentional, and professionally measured. Think formal estate gardens with mathematical precision.',
+      asymmetrical: 'ASYMMETRICAL LAYOUT: Plants should be placed in organic, natural-looking groupings with INTENTIONAL visual imbalance. Cluster plants in varying drift sizes — a group of 5 on one side balanced by a group of 3 on the other. Stagger heights and depths. Create visual flow and movement through the bed. Avoid straight lines and equal spacing. Use the "rule of odds" — odd-numbered groupings look more natural. Layer plants front-to-back with shorter species at the front edge and taller specimens toward the back. The composition should feel effortless, like nature arranged it — but with professional rhythm and balance.',
       naturalistic: 'NATURALISTIC LANDSCAPE: Organic, asymmetrical composition with soft transitions. Flowing curved lines. Plants clustered in drifts with natural rhythm and density variation. Edges between lawn, beds, and pathways are soft and blended. Natural materials — weathered stone, wood. Mood: immersive, relaxed, authentic.',
-      modern: 'MODERN/CONTEMPORARY LANDSCAPE: Minimalist, clean lines, strong geometry, intentional negative space. Hardscape dominates — poured concrete, large-format slabs, steel edging. Plantings sparse and sculptural. Color palette restrained: gray, black, white, deep green. Mood: sharp, controlled, sophisticated.',
-      tropical: 'TROPICAL LANDSCAPE: Dense, lush, resort-like with layered vegetation. Palms, banana trees, bird of paradise, elephant ears, ferns. Tight spacing with overlapping foliage. Vibrant saturated colors — deep greens with bright blooms. Mood: immersive, vibrant, luxurious.',
-      xeriscape: 'XERISCAPE LANDSCAPE: Water-efficient, minimal irrigation. Gravel, decomposed granite, crushed stone. Drought-tolerant species spaced widely. Boulders and rock formations. Earthy muted colors: tans, browns, silvers, soft greens. Mood: calm, efficient, resilient.',
-      mediterranean: 'MEDITERRANEAN LANDSCAPE: Warm, sun-driven, drought-tolerant with rustic elegance. Terracotta, natural stone, light pavers. Olive trees, lavender, rosemary, cypress. Warm earth tones — beige, terracotta, soft greens. Mood: warm, relaxed, timeless.',
-      cottage: 'COTTAGE GARDEN: Dense, informal, abundant flowering with romantic overflowing aesthetic. Tightly packed perennials, annuals, shrubs spilling over edges. Diverse vibrant colors. Narrow winding pathways. Mood: charming, nostalgic, controlled chaos.',
-      desert: 'DESERT/SOUTHWEST LANDSCAPE: Arid with bold plant forms. Sand, gravel, rock in warm tones. Cacti, succulents, agave spaced widely. Large boulders. Warm muted browns, tans, dusty greens. Mood: stark, dramatic, grounded.',
-      farmhouse: 'FARMHOUSE/RUSTIC LANDSCAPE: Simple, functional, natural materials. Hardy shrubs, native grasses, simple flowering plants in loose groupings. Wood, gravel, basic stone. Mood: practical, relaxed, grounded.',
-      transitional: 'TRANSITIONAL LANDSCAPE: Balanced blend of traditional structure with modern simplicity. Structured shrubs with looser ornamental grasses. Mix of classic and modern materials. Neutral palette with controlled accents. Mood: clean, approachable, adaptable.',
+      formal: 'FORMAL LANDSCAPE: Strict symmetry, axial alignment, geometric precision. Tightly clipped hedges forming defined borders. Evenly spaced ornamental trees with uniform canopy. Flower beds minimal and controlled with repeating patterns. Edges crisp and perfectly maintained.',
+      modern: 'MODERN/CONTEMPORARY LANDSCAPE: Minimalist, clean lines, strong geometry, intentional negative space. Plantings sparse and sculptural. Color palette restrained.',
+      tropical: 'TROPICAL LANDSCAPE: Dense, lush, resort-like with layered vegetation. Tight spacing with overlapping foliage. Vibrant saturated colors.',
     };
     const activeStyle = designStyle || 'naturalistic';
     const styleInstruction = renderStyleGuide[activeStyle] || renderStyleGuide.naturalistic;
@@ -1881,7 +1879,8 @@ app.post('/api/design-adjust', authenticate, async (req, res) => {
     const safePrompt = stripHtml(prompt.trim());
     const pctX = Math.max(0, Math.min(100, parseFloat(pinX)));
     const pctY = Math.max(0, Math.min(100, parseFloat(pinY)));
-    const pctR = Math.max(3, Math.min(30, parseFloat(radius) || 10));
+    const pctR = Math.max(3, Math.min(50, parseFloat(radius) || 10));
+    const isGlobalRevision = pctR >= 45; // Full-image revision (color swap, plant swap, etc.)
 
     console.log('[design-adjust] Pin at (%d%, %d%) radius %d%, prompt: %s', pctX, pctY, pctR, safePrompt);
 
@@ -1925,7 +1924,20 @@ app.post('/api/design-adjust', authenticate, async (req, res) => {
       .png()
       .toBuffer();
 
-    const editPrompt = `You are editing a landscape design photo. A circular mask is provided — the WHITE area is the ONLY area you may modify. Every pixel OUTSIDE the white circle MUST remain byte-for-byte identical to the original.
+    const editPrompt = isGlobalRevision
+      ? `You are revising a landscape design photo. Apply the following change ACROSS THE ENTIRE IMAGE — this is a global revision, not a localized edit.
+
+REVISION INSTRUCTION: ${safePrompt}
+
+STRICT RULES:
+1. Apply this change to EVERY matching element in the entire photo — not just one spot.
+2. If this is a COLOR SWAP (e.g. "red to pink"): Change the bloom/flower color of EVERY matching plant in the image. Keep plant species, sizes, positions, leaf color, and everything else IDENTICAL. Only the flower/bloom color changes.
+3. If this is a PLANT SWAP (e.g. "replace all azaleas with hawthorn"): Replace every instance of the specified plant with the new plant species. Match the same approximate size and position. The new plant should be rendered in full bloom.
+4. DO NOT alter the house, driveway, sky, lawn, mulch, edging, or any non-plant elements.
+5. DO NOT add, remove, or reposition any plants that aren't part of the swap. Everything not mentioned in the instruction stays PIXEL-IDENTICAL.
+6. The result must look like a real photograph — natural lighting, real textures, correct shadows, consistent perspective.
+7. If you are unsure which plants match the description, apply the change to ALL flowering plants of the specified color or species.`
+      : `You are editing a landscape design photo. A circular mask is provided — the WHITE area is the ONLY area you may modify. Every pixel OUTSIDE the white circle MUST remain byte-for-byte identical to the original.
 
 EDIT INSTRUCTION: ${safePrompt}
 
@@ -1936,19 +1948,23 @@ STRICT RULES:
 4. If adding plants, render them in FULL BLOOM with flowers showing at peak season.
 5. This must look like a real photograph, not illustrated or AI-generated.`;
 
-    console.log('[design-adjust] Calling Gemini gemini-2.5-flash-image...');
+    console.log(`[design-adjust] Calling Gemini gemini-2.5-flash-image... (${isGlobalRevision ? 'GLOBAL revision' : 'local pin adjustment'})`);
+
+    // For global revisions, skip the mask — send just the image and prompt
+    const geminiParts = isGlobalRevision
+      ? [
+          { inlineData: { mimeType: 'image/jpeg', data: resizedImg.toString('base64') } },
+          { text: editPrompt },
+        ]
+      : [
+          { inlineData: { mimeType: 'image/jpeg', data: resizedImg.toString('base64') } },
+          { inlineData: { mimeType: 'image/png', data: resizedMask.toString('base64') } },
+          { text: editPrompt },
+        ];
+
     const response = await googleAI.models.generateContent({
       model: 'gemini-2.5-flash-image',
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { inlineData: { mimeType: 'image/jpeg', data: resizedImg.toString('base64') } },
-            { inlineData: { mimeType: 'image/png', data: resizedMask.toString('base64') } },
-            { text: editPrompt },
-          ],
-        },
-      ],
+      contents: [{ role: 'user', parts: geminiParts }],
       config: {
         responseModalities: ['image', 'text'],
       },
@@ -2436,6 +2452,20 @@ app.post('/api/plants', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+app.delete('/api/plants/all', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const result = await db.query(
+      'DELETE FROM plant_library WHERE company_id = $1',
+      [req.user.companyId]
+    );
+    console.log(`[plants] Deleted all ${result.rowCount} plants for company ${req.user.companyId}`);
+    res.json({ message: `Deleted ${result.rowCount} products`, deleted: result.rowCount });
+  } catch (err) {
+    console.error('DELETE /api/plants/all error:', err.message);
+    res.status(500).json({ error: 'Failed to delete products' });
+  }
+});
+
 app.get('/api/plants/:id', authenticate, async (req, res) => {
   try {
     const plant = await db.getOne(
@@ -2502,72 +2532,119 @@ app.delete('/api/plants/:id', authenticate, requireAdmin, async (req, res) => {
 });
 
 // ─── CSV Parser Helper ───────────────────────────────────────────
-function parseCSVLine(line) {
-  const result = [];
-  let current = '';
+function parseCSV(text) {
+  // Full RFC 4180-compliant CSV parser that handles multi-line quoted fields
+  const rows = [];
+  let currentRow = [];
+  let currentField = '';
   let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
+  const len = text.length;
+
+  for (let i = 0; i < len; i++) {
+    const ch = text[i];
+
     if (inQuotes) {
-      if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
-      else if (ch === '"') { inQuotes = false; }
-      else { current += ch; }
+      if (ch === '"') {
+        if (i + 1 < len && text[i + 1] === '"') {
+          // Escaped quote ""
+          currentField += '"';
+          i++;
+        } else {
+          // End of quoted field
+          inQuotes = false;
+        }
+      } else {
+        // Inside quotes — include everything (newlines, commas, etc.)
+        currentField += ch;
+      }
     } else {
-      if (ch === '"') { inQuotes = true; }
-      else if (ch === ',') { result.push(current.trim()); current = ''; }
-      else { current += ch; }
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === ',') {
+        currentRow.push(currentField.trim());
+        currentField = '';
+      } else if (ch === '\n' || (ch === '\r' && text[i + 1] === '\n')) {
+        if (ch === '\r') i++; // skip \n after \r
+        currentRow.push(currentField.trim());
+        currentField = '';
+        // Only push non-empty rows
+        if (currentRow.length > 1 || (currentRow.length === 1 && currentRow[0])) {
+          rows.push(currentRow);
+        }
+        currentRow = [];
+      } else {
+        currentField += ch;
+      }
     }
   }
-  result.push(current.trim());
-  return result;
-}
+  // Handle last field/row
+  currentRow.push(currentField.trim());
+  if (currentRow.length > 1 || (currentRow.length === 1 && currentRow[0])) {
+    rows.push(currentRow);
+  }
 
-function parseCSV(text) {
-  const lines = text.split(/\r?\n/).filter(l => l.trim());
-  if (lines.length < 2) return null; // Need header + at least 1 row
-  const headers = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, ''));
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const vals = parseCSVLine(lines[i]);
+  if (rows.length < 2) return null; // Need header + at least 1 data row
+
+  const headers = rows[0].map(h => h.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, ''));
+  const dataRows = [];
+  for (let i = 1; i < rows.length; i++) {
+    const vals = rows[i];
     if (vals.length === 0 || (vals.length === 1 && !vals[0])) continue;
     const row = {};
     headers.forEach((h, j) => { row[h] = vals[j] || ''; });
-    rows.push(row);
+    dataRows.push(row);
   }
-  return { headers, rows };
+  return { headers, rows: dataRows };
 }
 
 function mapCSVToPlant(row, headers) {
   // Flexible column mapping — handles many naming conventions
   const find = (...candidates) => {
     for (const c of candidates) {
-      const match = headers.find(h => h === c || h.includes(c));
-      if (match && row[match]) return row[match];
+      // Exact match first, then substring match
+      const exact = headers.find(h => h === c);
+      if (exact && row[exact]) return row[exact];
+    }
+    for (const c of candidates) {
+      const partial = headers.find(h => h.includes(c));
+      if (partial && row[partial]) return row[partial];
     }
     return null;
   };
 
-  const commonName = find('common_name', 'common', 'plant_name', 'plant', 'name', 'item', 'description', 'variety', 'species');
-  if (!commonName) return null; // Skip rows without a plant name
+  // For name: try exact 'name' match first, avoid falling through to 'description' too eagerly
+  const commonName = find('common_name', 'plant_name', 'name', 'item', 'variety', 'species');
+  if (!commonName) return null; // Skip rows without a product name
 
   const parsePrice = (val) => {
     if (!val) return null;
     const cleaned = String(val).replace(/[$,\s]/g, '');
     const num = parseFloat(cleaned);
-    return isNaN(num) ? null : num;
+    return isNaN(num) || num === 0 ? null : num;
   };
+
+  // Try to extract container size from the name (e.g. "Agave Blue Glow 2 Gallon" → "2-gal")
+  let extractedSize = null;
+  const sizeMatch = commonName.match(/(\d+)\s*(?:gallon|gal)\b/i);
+  const flatMatch = commonName.match(/(\d+)\s*count\s*(quart|pint)?\s*flat/i);
+  if (sizeMatch) extractedSize = `${sizeMatch[1]}-gal`;
+  else if (flatMatch) extractedSize = `${flatMatch[1]}-ct flat`;
+
+  // Map 'Category' → our internal category names
+  const rawCategory = find('category', 'type', 'plant_type', 'class') || null;
+  const mappedCategory = rawCategory ? rawCategory.toLowerCase().replace('product', '').trim() || null : null;
 
   return {
     common_name: commonName,
     botanical_name: find('botanical_name', 'botanical', 'latin', 'scientific', 'bot_name') || null,
-    category: find('category', 'type', 'plant_type', 'class') || null,
-    container_size: find('container_size', 'container', 'size', 'pot_size', 'pot', 'gallon', 'gal') || null,
-    wholesale_price: parsePrice(find('wholesale_price', 'wholesale', 'cost', 'unit_cost', 'price')),
-    retail_price: parsePrice(find('retail_price', 'retail', 'sell_price', 'selling_price', 'msrp')),
+    category: mappedCategory || null,
+    container_size: find('container_size', 'container', 'pot_size', 'pot', 'gallon', 'gal') || extractedSize || null,
+    wholesale_price: parsePrice(find('wholesale_price', 'wholesale', 'unit_cost')),
+    retail_price: parsePrice(find('retail_price', 'retail', 'sell_price', 'selling_price', 'msrp', 'unit_price')),
     sun_requirement: find('sun_requirement', 'sun', 'light', 'exposure') || null,
     water_needs: find('water_needs', 'water', 'irrigation') || null,
     is_native: (() => { const v = find('is_native', 'native'); return v ? /^(true|yes|y|1)$/i.test(v) : false; })(),
-    notes: find('notes', 'note', 'comments', 'comment', 'memo', 'details') || null,
+    notes: find('notes', 'note', 'comments', 'comment', 'memo', 'details', 'description') || null,
   };
 }
 
@@ -2764,7 +2841,10 @@ app.post('/api/projects/:projectId/designs/generate', authenticate, requireActiv
       const photoUrls = photos.map(p => p.cdn_url).filter(Boolean);
       if (openaiClient) {
         try {
-          const plantNames = plants.slice(0, 50).map(p => `${p.common_name} (${p.botanical_name || ''}, ${p.category || ''}, ${p.container_size || ''}, $${p.unit_cost || 0})`).join('\n');
+          // Send ALL available plants from the company's inventory — filter to actual plant categories (not services/supplies)
+          const plantItems = plants.filter(p => p.common_name && !['service', 'supply'].includes((p.category || '').toLowerCase()));
+          const plantNames = plantItems.map(p => `${p.common_name}${p.container_size ? ' (' + p.container_size + ')' : ''}${p.category ? ' [' + p.category + ']' : ''}${p.wholesale_price ? ' $' + p.wholesale_price : p.retail_price ? ' $' + p.retail_price : ''}`).join('\n');
+          console.log(`[design-gen] Sending ${plantItems.length} plants from inventory (of ${plants.length} total products) to AI`);
           const getPlantName = (p) => {
             const name = p.identified_name || p.common_name || p.botanical_name || '';
             // Skip corrupted names from old bug
@@ -2803,97 +2883,33 @@ app.post('/api/projects/:projectId/designs/generate', authenticate, requireActiv
 
           // Build style-specific guidance — production-grade master prompt system
           const styleGuide = {
-            formal: `FORMAL LANDSCAPE — MASTER PROMPT:
-A highly structured formal landscape defined by strict symmetry, axial alignment, and geometric precision. The layout is organized around a dominant central axis extending from the primary viewpoint, with mirrored elements on both sides.
-Include a strong focal point such as a classical stone fountain, sculpture, or circular parterre positioned at the intersection of major sightlines. Pathways are straight, evenly spaced, and constructed from cut limestone, brick, or modular pavers, forming clean geometric patterns.
-Plantings consist of tightly clipped hedges such as boxwood or yaupon holly forming defined borders and compartments. Incorporate topiary elements and evenly spaced ornamental trees such as live oak, magnolia, or Italian cypress with uniform canopy shaping. Lawn areas are pristine, level, and sharply edged against planting beds.
-Flower beds are minimal and controlled, using repeating patterns and limited color palettes such as white, lavender, or seasonal annual rotations. No randomness — every plant is placed intentionally and evenly spaced.
-Hardscape elements include stone urns, balustrades, gravel courts, and low retaining walls. Edges are crisp and perfectly maintained.
-Lighting is subtle and symmetrical, highlighting pathways and focal points evenly.
-Mood is disciplined, timeless, and authoritative. The space conveys control, wealth, and permanence.`,
+            symmetrical: `SYMMETRICAL LAYOUT — MASTER PROMPT:
+This design MUST use PERFECTLY MIRRORED, BALANCED plant placement with mathematical precision. Every plant arrangement must be organized around a central axis.
+SPACING RULES: All plants of the same species must be placed at EXACTLY equal distances from each other. Use triangular grid spacing — if you have 6 roses, place 3 on each side of center at identical mirror positions. Measure visually: left side must be a perfect mirror of right side.
+ARRANGEMENT: Place plants in clean, straight rows or evenly spaced arcs. Each species gets its own row or band. Taller plants go in back, shorter in front, but within each row the spacing is UNIFORM — like a ruler was used.
+If the client says "roses and azaleas" — place roses in a perfectly straight line with identical spacing (e.g., every 3 feet), then azaleas in their own row in front, also perfectly spaced. The result should look professionally measured and intentional.
+EDGES: Bed edges are crisp and defined. Plants are set back uniformly from the edge.
+Mood: orderly, professional, estate-quality, intentional. Every plant has a purpose and a precise position.`,
+
+            asymmetrical: `ASYMMETRICAL LAYOUT — MASTER PROMPT:
+This design MUST use ORGANIC, NATURAL-LOOKING plant groupings with intentional visual imbalance and flowing rhythm. Avoid straight lines and equal spacing entirely.
+SPACING RULES: Cluster plants in varying drift sizes — a group of 5 on one side balanced by a group of 3 on the other. Stagger heights and depths throughout the bed. NO straight rows. NO equal spacing. Plants should be arranged in natural-looking clusters with varying gaps between groups.
+ARRANGEMENT: Use the "rule of odds" — odd-numbered groupings (3, 5, 7) look more natural than even numbers. Layer plants front-to-back with shorter species cascading at the front edge and taller specimens anchoring the back. Create visual flow and movement — the eye should travel through the bed naturally.
+If the client says "roses and azaleas" — cluster 5 roses in one area with 2 more offset to the side, then weave azaleas in drifts of 3-5 between and around the roses. Each grouping should feel like it grew there naturally.
+EDGES: Bed edges are softened by plants that spill slightly forward. Groundcover and low plants create an organic transition to lawn.
+Mood: effortless, natural, professionally curated but not rigid. Like nature arranged it with a designer's eye.`,
 
             naturalistic: `NATURALISTIC LANDSCAPE — MASTER PROMPT:
-An organic, ecologically inspired landscape designed to mimic natural plant communities with asymmetrical composition and soft transitions. The layout avoids rigid geometry and instead uses flowing, curved lines that guide movement naturally.
-Pathways are meandering and constructed from decomposed granite, mulch trails, or irregular flagstone. Edges between lawn, planting beds, and pathways are soft and blended rather than sharply defined.
-Plant palette consists of regionally appropriate native and adaptive species arranged in layered groupings: canopy trees, understory shrubs, ornamental grasses, and groundcover. Plants are clustered in drifts rather than evenly spaced, creating a natural rhythm and density variation.
-Include seasonal diversity, with plants chosen for staggered bloom times, texture variation, and movement in wind. Incorporate pollinator-friendly species and habitat-supporting vegetation.
-Water features, if present, resemble natural streams or ponds with irregular stone edges and gradual transitions.
-Hardscape is minimal and uses natural materials such as weathered stone or wood. No polished or overly refined finishes.
-Lighting is low and ambient, mimicking natural light patterns rather than highlighting structure.
-Mood is immersive, relaxed, and authentic. The landscape should feel like a curated extension of nature rather than a constructed environment.`,
+An organic, ecologically inspired landscape with asymmetrical composition and soft transitions. Plants clustered in drifts with natural rhythm and density variation. Flowing curved lines. Edges soft and blended. Mood: immersive, relaxed, authentic.`,
 
-            modern: `MODERN / CONTEMPORARY LANDSCAPE — MASTER PROMPT:
-A minimalist modern landscape defined by clean lines, strong geometry, and intentional use of negative space. The layout is structured but not symmetrical, using rectangles, linear paths, and sharp angles to define zones.
-Hardscape dominates the design, featuring materials such as poured-in-place concrete, large-format slabs, steel edging, and gravel. Pathways consist of floating concrete pavers with precise spacing.
-Plantings are sparse and highly intentional, using sculptural species such as agave, yucca, boxwood spheres, bamboo, or ornamental grasses. Plants are treated as architectural elements rather than mass plantings.
-Color palette is restrained, dominated by neutral tones such as gray, black, white, and deep green. Occasional accent colors may be used sparingly.
-Lawn areas are minimal or eliminated entirely. Open space is a key design element.
-Water features, if present, are geometric and minimal, such as reflecting pools or linear fountains.
-Lighting is integrated and architectural, emphasizing shadows, lines, and textures.
-Mood is sharp, controlled, and sophisticated. The space conveys precision, efficiency, and high-end design.`,
+            modern: `MODERN LANDSCAPE — MASTER PROMPT:
+Minimalist, clean lines, strong geometry, intentional negative space. Plantings sparse and sculptural. Color palette restrained.`,
 
             tropical: `TROPICAL LANDSCAPE — MASTER PROMPT:
-A dense, lush tropical landscape designed to create a resort-like environment with layered vegetation and immersive plant coverage. The layout prioritizes enclosure, depth, and sensory richness.
-Plant palette includes palms, banana trees, bird of paradise, hibiscus, elephant ears, ferns, and other broadleaf tropical species. Vegetation is layered vertically with tall canopy palms, mid-level shrubs, and dense groundcover.
-Plant spacing is tight, with overlapping foliage creating a full, abundant appearance. Large leaves and contrasting textures dominate the visual experience.
-Color palette is vibrant and saturated, combining deep greens with bright tropical blooms in reds, oranges, and yellows.
-Pathways are natural and partially concealed, using stepping stones or irregular stone surfaces surrounded by planting.
-Water features such as waterfalls, ponds, or pools are integrated seamlessly into the environment, often surrounded by dense planting.
-Hardscape materials include natural stone, textured concrete, and wood.
-Lighting is warm and dramatic, highlighting foliage and creating depth at night.
-Mood is immersive, vibrant, and luxurious. The environment feels alive, slightly wild, and enclosed.`,
+Dense, lush, resort-like with layered vegetation. Tight spacing with overlapping foliage. Vibrant saturated colors.`,
 
-            xeriscape: `XERISCAPE LANDSCAPE — MASTER PROMPT:
-A water-efficient xeriscape landscape designed for minimal irrigation and long-term sustainability. The layout emphasizes spacing, simplicity, and material contrast.
-Ground surfaces are dominated by gravel, decomposed granite, or crushed stone in natural tones. Dry riverbeds or drainage swales may be incorporated.
-Plant palette includes drought-tolerant species such as agave, yucca, cacti, desert grasses, and hardy shrubs. Plants are spaced widely to allow each specimen to stand out individually.
-Hardscape elements include boulders, stone clusters, and naturalistic rock formations integrated into the design.
-Color palette is earthy and muted, featuring tans, browns, silvers, and soft greens.
-Irrigation is minimal and designed for efficiency, typically drip-based.
-No dense lawn areas; turf is eliminated or extremely limited.
-Lighting is subtle and focused on highlighting plant forms and textures.
-Mood is calm, efficient, and resilient. The space reflects environmental awareness and low-maintenance design.`,
-
-            mediterranean: `MEDITERRANEAN LANDSCAPE — MASTER PROMPT:
-A warm, sun-driven Mediterranean landscape combining drought tolerance with refined, rustic elegance. The layout features open spaces, gravel surfaces, and structured but relaxed geometry.
-Pathways and patios use materials such as terracotta, natural stone, or light-colored pavers. Courtyard-style layouts are common.
-Plant palette includes olive trees, lavender, rosemary, cypress, and other drought-tolerant aromatic plants. Vegetation is spaced to allow airflow and sun exposure.
-Color palette emphasizes warm earth tones, including beige, terracotta, and soft greens.
-Water features may include simple fountains or tiled basins.
-Hardscape integrates stucco walls, clay pots, and rustic textures.
-Mood is warm, relaxed, and timeless with a balance between structure and informality.`,
-
-            cottage: `COTTAGE GARDEN — MASTER PROMPT:
-A dense, informal cottage garden filled with abundant flowering plants and a romantic, overflowing aesthetic. The layout is loose and asymmetrical with minimal visible structure.
-Plantings are tightly packed and layered, featuring a wide variety of flowering perennials, annuals, and shrubs. Plants spill over pathways and edges, creating a soft, overflowing effect.
-Color palette is diverse and vibrant, with mixed blooms in multiple colors.
-Pathways are narrow and winding, often made of stone or gravel and partially covered by plant growth.
-Hardscape is minimal and rustic, often including wooden elements or vintage-style features.
-Mood is charming, nostalgic, and highly textured with a sense of controlled chaos.`,
-
-            desert: `DESERT / SOUTHWEST LANDSCAPE — MASTER PROMPT:
-A desert-inspired landscape reflecting arid environments with bold plant forms and minimal water use. The layout emphasizes open space, strong shadows, and sculptural elements.
-Ground surfaces consist of sand, gravel, and rock in warm tones.
-Plant palette includes cacti, succulents, agave, and desert-adapted shrubs spaced widely.
-Hardscape includes large boulders and natural rock formations integrated into the design.
-Color palette is warm and muted, dominated by browns, tans, and dusty greens.
-Lighting enhances contrast and shadow, emphasizing plant shapes.
-Mood is stark, dramatic, and grounded in natural desert aesthetics.`,
-
-            farmhouse: `FARMHOUSE / RUSTIC LANDSCAPE — MASTER PROMPT:
-A simple, functional farmhouse landscape blending natural materials with practical layout design. The composition is open and unpretentious with a focus on usability.
-Plant palette includes hardy shrubs, native grasses, and simple flowering plants arranged in loose groupings.
-Hardscape uses wood, gravel, and basic stone elements. Fencing, raised beds, and functional outdoor spaces are common.
-Color palette is natural and subdued.
-Mood is practical, relaxed, and grounded, with a balance between function and aesthetic.`,
-
-            transitional: `TRANSITIONAL LANDSCAPE — MASTER PROMPT:
-A balanced transitional landscape blending traditional structure with modern simplicity. The layout combines clean lines with softened edges, avoiding extremes of rigidity or informality.
-Plant palette includes structured shrubs combined with looser ornamental grasses and seasonal accents.
-Hardscape uses a mix of classic and modern materials such as pavers with simplified patterns.
-Color palette is neutral with controlled accents.
-The design is versatile and broadly appealing, suitable for a wide range of properties.
-Mood is clean, approachable, and adaptable.`,
+            formal: `FORMAL LANDSCAPE — MASTER PROMPT:
+Strict symmetry, axial alignment, geometric precision. Evenly spaced plants with uniform placement. Edges crisp and defined.`,
           };
 
           const sunExposure = project.sun_exposure || 'full_sun';
@@ -2936,7 +2952,11 @@ ${styleGuide[designStyle] || styleGuide.naturalistic}
           if (clientRequests.trim()) {
             userPrompt += `\nCLIENT PLANT REQUESTS (use these EXACT plants, do NOT substitute): ${clientRequests}\n`;
           }
-          userPrompt += `\nAVAILABLE NURSERY INVENTORY:\n${plantNames || '(No inventory loaded — suggest the best plants you know work in this exact zone and microclimate based on your 50 years of local experience)'}`;
+          if (plantNames) {
+            userPrompt += `\n⚠️ MANDATORY PLANT INVENTORY — YOU MUST ONLY USE PLANTS FROM THIS LIST:\n${plantNames}\n\n⛔ DO NOT use any plant that is NOT on this list. Every single plant in your design MUST appear in the inventory above. If a client-requested plant is not on this list, find the closest match FROM THIS LIST and use that instead. No exceptions. No outside plants. This is the company's actual nursery availability — if it's not on the list, they cannot source it.`;
+          } else {
+            userPrompt += `\nNo nursery inventory loaded — suggest the best plants you know work in this exact zone and microclimate.`;
+          }
 
           console.log('[design-gen] Prompt preview:', userPrompt.substring(0, 300));
 
@@ -2948,8 +2968,11 @@ ${styleGuide[designStyle] || styleGuide.naturalistic}
               role: 'system',
               content: `You are FILO — a master landscape architect with 50 years of hands-on residential design experience in the Gulf Coast region.
 
+RULE #0 — INVENTORY LOCK (HIGHEST PRIORITY):
+You MUST ONLY use plants that appear in the AVAILABLE NURSERY INVENTORY list provided in the user prompt. Do NOT invent, suggest, or include ANY plant species that is not explicitly listed in the inventory. If a plant is not on the list, it DOES NOT EXIST for this design. Match plants by name — use the exact common_name from the inventory. Use the container sizes and prices from the inventory. If the inventory has "Knockout Rose 3 Gallon" then use that — do not substitute "Knockout Rose 5 Gallon" if 5-gal is not listed. Every plant in your output JSON MUST be traceable to a specific line item in the inventory.
+
 RULE #1 — CLIENT PLANT REQUESTS ARE SACRED:
-If the client specifies plants, you MUST include ALL of them. Do NOT substitute, swap, or replace any with alternatives. If they say "azaleas" — use AZALEAS, not Indian Hawthorn. If the species count allows more plants than the client named, YOU choose the extras to complement their picks. If the client named MORE plants than the species limit, include all of them anyway (client requests override the species count). Place plants in the appropriate layers by mature height, and adjust quantities to fill the bed.
+If the client specifies plants, you MUST include ALL of them — BUT only if they exist in the inventory. If the client requests a plant that is NOT in the inventory, find the CLOSEST AVAILABLE MATCH from the inventory (same genus, similar size, similar function) and use that instead. Do NOT use plants from outside the inventory under any circumstances. If the species count allows more plants than the client named, choose extras FROM THE INVENTORY to complement their picks.
 
 RULE #2 — SPECIES COUNT (STRICTLY ENFORCED):
 You MUST use EXACTLY ${maxSpecies} different plant species. Before you output JSON, list every unique common_name you used and COUNT them. If the count is not ${maxSpecies}, add or remove species until it is. This is the #1 most important rule after Rule #1.${maxSpecies === 1 ? ' Use ONLY ONE plant species across all layers.' : ` You need ${maxSpecies} unique plant names spread across the layers. A species in multiple layers still counts as 1.`}
@@ -2966,8 +2989,9 @@ RULE #3 — REMOVAL AND KEPT PLANTS:
 GENERAL GUIDELINES:
 - Space plants at 75% of mature width for full coverage within 18 months
 - Include steel edging (typically 40-80 LF) and 3-4" hardwood mulch over weed barrier
-- Use real wholesale nursery pricing ($8-15 for 1-gal, $22-38 for 3-gal, $35-55 for 5-gal, $120-180 for 15-gal trees)
+- Use the EXACT prices from the inventory list. If a plant shows a price, use that price as unit_cost. Do NOT make up prices.
 - Your design must ONLY contain NEW plants being installed (plus notes about what's staying).
+- Every common_name in your output MUST match a plant from the inventory list EXACTLY — same spelling, same container size.
 
 BOTANICAL KNOWLEDGE (use this to avoid mistakes):
 - Asiatic Jasmine (Trachelospermum asiaticum) is a LOW GROUNDCOVER with NO flowers — it does NOT produce white flowers. Do NOT confuse it with Star Jasmine (Trachelospermum jasminoides) which DOES have white fragrant flowers. If the client requests Asiatic Jasmine, describe it accurately as a dense, dark-green, non-flowering evergreen groundcover.
@@ -3156,7 +3180,7 @@ app.post('/api/designs/:designId/chat', authenticate, async (req, res) => {
 
     // Send to AI for interpretation
     const designData = design.design_data ? (typeof design.design_data === 'string' ? JSON.parse(design.design_data) : design.design_data) : {};
-    const availablePlants = await db.getMany('SELECT * FROM plant_library WHERE company_id = $1 OR company_id IS NULL ORDER BY common_name LIMIT 100', [req.user.companyId]);
+    const availablePlants = await db.getMany('SELECT * FROM plant_library WHERE (company_id = $1 OR company_id IS NULL) AND is_available = true ORDER BY common_name', [req.user.companyId]);
     const aiResponse = await callManusAI('design_chat', {
       command: message,
       currentDesign: designData.plants || [],
@@ -3562,13 +3586,13 @@ app.post('/api/projects/:projectId/submittals/generate', authenticate, async (re
         [project.id, req.user.companyId, estimate?.id, `Landscape Design Proposal`, narrative.text]
       );
 
-      // Add plant profiles
+      // Add plant profiles with full details for PDF
       for (let i = 0; i < designPlants.length; i++) {
         const p = designPlants[i];
         await client.query(
-          `INSERT INTO submittal_plant_profiles (submittal_id, plant_library_id, sort_order, plant_name, image_url, bloom_info, water_info, sun_info, poetic_desc)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-          [sub.rows[0].id, p.id, i, p.common_name, p.image_url, `${p.bloom_color}, ${p.bloom_season}`, p.water_needs, p.sun_requirement, p.poetic_description]
+          `INSERT INTO submittal_plant_profiles (submittal_id, plant_library_id, sort_order, plant_name, common_name, botanical_name, container_size, quantity, description, image_url, bloom_info, water_info, sun_info, poetic_desc)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+          [sub.rows[0].id, p.id || null, i, p.common_name, p.common_name, p.botanical_name || null, p.container_size || null, p.quantity || 1, p.description || p.poetic_description || null, p.image_url || null, `${p.bloom_color || ''} ${p.bloom_season || ''}`.trim() || null, p.water_needs || null, p.sun_requirement || null, p.poetic_description || null]
         );
       }
 
@@ -4362,7 +4386,32 @@ app.post('/api/estimates/:id/pdf/all', authenticate, async (req, res) => {
 });
 
 app.post('/api/submittals/:id/pdf', authenticate, async (req, res) => {
-  res.status(501).json({ error: 'PDF generation not yet implemented. Export via /projects/:id/export instead.' });
+  try {
+    let designRenderUrl = req.body?.designRenderUrl || null;
+
+    // If the frontend sent a data URL for the render, upload it to storage first
+    if (designRenderUrl && designRenderUrl.startsWith('data:')) {
+      try {
+        const b64 = designRenderUrl.replace(/^data:image\/[^;]+;base64,/, '');
+        const imgBuffer = Buffer.from(b64, 'base64');
+        const storageKey = `${req.user.companyId}/renders/submittal-${req.params.id}.jpg`;
+        await supaStorage.upload(storageKey, imgBuffer, 'image/jpeg');
+        designRenderUrl = supaStorage.getPublicUrl(storageKey);
+        console.log('[submittals/pdf] Uploaded design render to storage:', designRenderUrl.substring(0, 80));
+      } catch (uploadErr) {
+        console.warn('[submittals/pdf] Render upload failed, using data URL:', uploadErr.message);
+        // Keep the data URL — the PDF engine can handle it
+      }
+    }
+
+    const { SubmittalPDFGenerator } = await import('./filo-pdf-engine.js');
+    const generator = new SubmittalPDFGenerator(db, supaStorage);
+    const result = await generator.generate(req.params.id, req.user.companyId, { designRenderUrl });
+    res.json(result);
+  } catch (err) {
+    console.error('[submittals/pdf] Error:', err.message);
+    res.status(500).json({ error: `PDF generation failed: ${err.message}` });
+  }
 });
 
 app.post('/api/submittals/:id/pdf-and-push', authenticate, async (req, res) => {
@@ -4549,6 +4598,59 @@ app.listen(config.port, async () => {
     console.log('   plant_library table ready');
   } catch (e) {
     console.warn('   plant_library table check failed:', e.message);
+  }
+
+  // Ensure company submittal branding columns exist
+  try {
+    const companyCols = [
+      ['tagline', 'VARCHAR(255)'],
+      ['credentials', 'TEXT'],
+      ['submittal_primary_color', "VARCHAR(7) DEFAULT '#1a3a2a'"],
+      ['submittal_accent_color', "VARCHAR(7) DEFAULT '#2d6a4f'"],
+      ['logo_url', 'TEXT'],
+      ['website', 'VARCHAR(255)'],
+    ];
+    for (const [col, type] of companyCols) {
+      try { await db.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch (e) { /* exists */ }
+    }
+    console.log('   company submittal columns ready');
+  } catch (e) {
+    console.warn('   company submittal columns check failed:', e.message);
+  }
+
+  // Ensure submittal_plant_profiles has detailed columns
+  try {
+    await db.query(`CREATE TABLE IF NOT EXISTS submittal_plant_profiles (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      submittal_id UUID NOT NULL,
+      plant_library_id UUID,
+      sort_order INTEGER DEFAULT 0,
+      plant_name VARCHAR(255),
+      common_name VARCHAR(255),
+      botanical_name VARCHAR(255),
+      container_size VARCHAR(100),
+      quantity INTEGER DEFAULT 1,
+      description TEXT,
+      image_url TEXT,
+      bloom_info VARCHAR(255),
+      water_info VARCHAR(100),
+      sun_info VARCHAR(100),
+      poetic_desc TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`);
+    const ppCols = [
+      ['container_size', 'VARCHAR(100)'],
+      ['quantity', 'INTEGER DEFAULT 1'],
+      ['description', 'TEXT'],
+      ['common_name', 'VARCHAR(255)'],
+      ['botanical_name', 'VARCHAR(255)'],
+    ];
+    for (const [col, type] of ppCols) {
+      try { await db.query(`ALTER TABLE submittal_plant_profiles ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch (e) { /* exists */ }
+    }
+    console.log('   submittal_plant_profiles table ready');
+  } catch (e) {
+    console.warn('   submittal_plant_profiles check failed:', e.message);
   }
 });
 
