@@ -1589,7 +1589,7 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
     }
 
     const edgeDesc = edgeStyle === 'square'
-      ? 'perfectly straight lines and exact 90-degree right angles at every corner. Even if the existing bed has curves, convert ALL curves into straight segments meeting at sharp 90° corners. The bed must look like a rectangle or series of rectangles — no curves, no arcs, no rounded transitions anywhere. The ends of the bed must terminate with flat straight cuts perpendicular to the house wall. Think formal garden geometry.'
+      ? 'perfectly straight lines and exact 90-degree right angles at every corner. Even if the existing bed has curves, convert ALL curves into straight segments meeting at sharp 90° corners. The bed must look like a rectangle or series of rectangles — no curves, no arcs, no rounded transitions anywhere. Think formal garden geometry.'
       : 'smooth flowing curves with natural rounded transitions. Follow the natural contour the user drew (or the existing bed shape). Soften any sharp angles into gentle arcs. The edge should flow like a river — organic and graceful.';
 
     const adjustDesc = !adjustmentFeet || adjustmentFeet === 0
