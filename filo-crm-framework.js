@@ -546,7 +546,8 @@ export default class CRMManager {
     const integration = await this.getActiveIntegration(companyId);
     if (!integration) return { skipped: true, reason: 'No active CRM integration' };
 
-    const client = await this.db.getOne('SELECT * FROM clients WHERE id = $1', [clientId]);
+    const client = await this.db.getOne('SELECT * FROM clients WHERE id = $1 AND company_id = $2', [clientId, companyId]);
+    if (!client) throw new Error('Client not found or access denied');
     const adapter = this.getAdapter(integration);
 
     return adapter.pushClient(client);
@@ -556,15 +557,17 @@ export default class CRMManager {
     const integration = await this.getActiveIntegration(companyId);
     if (!integration) return { skipped: true };
 
-    const project = await this.db.getOne('SELECT * FROM projects WHERE id = $1', [projectId]);
-    const client = await this.db.getOne('SELECT * FROM clients WHERE id = $1', [project.client_id]);
+    const project = await this.db.getOne('SELECT * FROM projects WHERE id = $1 AND company_id = $2', [projectId, companyId]);
+    if (!project) throw new Error('Project not found or access denied');
+    const client = await this.db.getOne('SELECT * FROM clients WHERE id = $1 AND company_id = $2', [project.client_id, companyId]);
+    if (!client) throw new Error('Client not found or access denied');
     const adapter = this.getAdapter(integration);
 
     // Ensure client is synced first
     if (!client.crm_external_id) {
       await adapter.pushClient(client);
       // Reload client to get external ID
-      const updatedClient = await this.db.getOne('SELECT * FROM clients WHERE id = $1', [client.id]);
+      const updatedClient = await this.db.getOne('SELECT * FROM clients WHERE id = $1 AND company_id = $2', [client.id, companyId]);
       Object.assign(client, updatedClient);
     }
 
@@ -575,15 +578,18 @@ export default class CRMManager {
     const integration = await this.getActiveIntegration(companyId);
     if (!integration) return { skipped: true };
 
-    const estimate = await this.db.getOne('SELECT * FROM estimates WHERE id = $1', [estimateId]);
-    const project = await this.db.getOne('SELECT * FROM projects WHERE id = $1', [estimate.project_id]);
-    const client = await this.db.getOne('SELECT * FROM clients WHERE id = $1', [project.client_id]);
+    const estimate = await this.db.getOne('SELECT * FROM estimates WHERE id = $1 AND company_id = $2', [estimateId, companyId]);
+    if (!estimate) throw new Error('Estimate not found or access denied');
+    const project = await this.db.getOne('SELECT * FROM projects WHERE id = $1 AND company_id = $2', [estimate.project_id, companyId]);
+    if (!project) throw new Error('Project not found or access denied');
+    const client = await this.db.getOne('SELECT * FROM clients WHERE id = $1 AND company_id = $2', [project.client_id, companyId]);
+    if (!client) throw new Error('Client not found or access denied');
     const adapter = this.getAdapter(integration);
 
     // Ensure project is synced first
     if (!project.crm_external_id) {
       await this.syncProject(companyId, project.id);
-      const updatedProject = await this.db.getOne('SELECT * FROM projects WHERE id = $1', [project.id]);
+      const updatedProject = await this.db.getOne('SELECT * FROM projects WHERE id = $1 AND company_id = $2', [project.id, companyId]);
       Object.assign(project, updatedProject);
     }
 
@@ -594,21 +600,24 @@ export default class CRMManager {
     const integration = await this.getActiveIntegration(companyId);
     if (!integration) return { skipped: true };
 
-    const client = await this.db.getOne('SELECT * FROM clients WHERE id = $1', [clientId]);
+    const client = await this.db.getOne('SELECT * FROM clients WHERE id = $1 AND company_id = $2', [clientId, companyId]);
+    if (!client) throw new Error('Client not found or access denied');
     if (!client.crm_external_id) return { skipped: true, reason: 'Client not synced to CRM' };
 
     const adapter = this.getAdapter(integration);
     return adapter.pushDocument(fileUrl, fileName, client.crm_external_id);
   }
 
-  // ─── Full project sync (called at Step 10) ────────────────────
+  // ─── Full project sync (called at Step 8 CRM Push) ────────────
 
   async syncFullProject(companyId, projectId) {
     const results = { client: null, project: null, estimate: null, submittal: null, documents: [] };
 
     try {
-      const project = await this.db.getOne('SELECT * FROM projects WHERE id = $1', [projectId]);
-      const client = await this.db.getOne('SELECT * FROM clients WHERE id = $1', [project.client_id]);
+      const project = await this.db.getOne('SELECT * FROM projects WHERE id = $1 AND company_id = $2', [projectId, companyId]);
+      if (!project) throw new Error('Project not found or access denied');
+      const client = await this.db.getOne('SELECT * FROM clients WHERE id = $1 AND company_id = $2', [project.client_id, companyId]);
+      if (!client) throw new Error('Client not found or access denied');
 
       // 1. Sync client
       results.client = await this.syncClient(companyId, client.id);
@@ -617,15 +626,15 @@ export default class CRMManager {
       results.project = await this.syncProject(companyId, projectId);
 
       // 3. Sync estimate
-      const estimate = await this.db.getOne('SELECT * FROM estimates WHERE project_id = $1 AND is_current = true', [projectId]);
+      const estimate = await this.db.getOne('SELECT * FROM estimates WHERE project_id = $1 AND company_id = $2 AND is_current = true', [projectId, companyId]);
       if (estimate) {
         results.estimate = await this.syncEstimate(companyId, estimate.id);
       }
 
       // 4. Sync submittal PDF
       const submittal = await this.db.getOne(
-        'SELECT s.*, f.cdn_url FROM submittals s LEFT JOIN files f ON f.id = s.pdf_file_id WHERE s.project_id = $1 AND s.is_current = true',
-        [projectId]
+        'SELECT s.*, f.cdn_url FROM submittals s LEFT JOIN files f ON f.id = s.pdf_file_id WHERE s.project_id = $1 AND s.company_id = $2 AND s.is_current = true',
+        [projectId, companyId]
       );
       if (submittal?.cdn_url) {
         results.submittal = await this.syncDocument(companyId, submittal.cdn_url, 'Submittal.pdf', client.id);
@@ -634,8 +643,8 @@ export default class CRMManager {
       // 5. Sync before/after images
       const photos = await this.db.getMany(
         `SELECT f.cdn_url, f.original_name FROM photos p JOIN files f ON f.id = p.file_id
-         JOIN property_areas pa ON pa.id = p.property_area_id WHERE pa.project_id = $1`,
-        [projectId]
+         JOIN property_areas pa ON pa.id = p.property_area_id WHERE pa.project_id = $1 AND pa.company_id = $2`,
+        [projectId, companyId]
       );
       for (const photo of photos) {
         const docResult = await this.syncDocument(companyId, photo.cdn_url, photo.original_name, client.id);
@@ -644,15 +653,15 @@ export default class CRMManager {
 
       // Update project sync status
       await this.db.query(
-        "UPDATE projects SET crm_sync_status = 'synced', crm_synced_at = NOW() WHERE id = $1",
-        [projectId]
+        "UPDATE projects SET crm_sync_status = 'synced', crm_synced_at = NOW() WHERE id = $1 AND company_id = $2",
+        [projectId, companyId]
       );
 
       return { success: true, results };
     } catch (err) {
       await this.db.query(
-        "UPDATE projects SET crm_sync_status = 'failed' WHERE id = $1",
-        [projectId]
+        "UPDATE projects SET crm_sync_status = 'failed' WHERE id = $1 AND company_id = $2",
+        [projectId, companyId]
       );
       return { success: false, error: err.message, results };
     }
@@ -707,9 +716,19 @@ export function mountCRMRoutes(app, crmManager, authenticate, requireAdmin) {
       const integration = await crmManager.getActiveIntegration(req.user.companyId);
       if (!integration) return res.json({ connected: false, integration: null });
       const testResult = await crmManager.testConnection(req.user.companyId).catch(() => ({ connected: false }));
-      res.json({ ...testResult, connected: !!integration, integration });
+      // Strip sensitive credentials before sending to client
+      const safeIntegration = {
+        id: integration.id,
+        provider: integration.provider,
+        status: integration.status,
+        last_sync_at: integration.last_sync_at,
+        last_sync_status: integration.last_sync_status,
+        created_at: integration.created_at,
+        updated_at: integration.updated_at,
+      };
+      res.json({ ...testResult, connected: !!integration, integration: safeIntegration });
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      res.status(500).json({ error: 'Failed to check CRM status' });
     }
   });
 
@@ -720,14 +739,20 @@ export function mountCRMRoutes(app, crmManager, authenticate, requireAdmin) {
       const result = await crmManager.connect(req.user.companyId, provider, credentials);
       res.json(result);
     } catch (err) {
-      res.status(400).json({ error: err.message });
+      console.error('[crm/connect] Error:', err);
+      res.status(400).json({ error: process.env.NODE_ENV === 'production' ? 'Internal error' : err.message });
     }
   });
 
   // Disconnect CRM
   app.post('/api/crm/disconnect', authenticate, requireAdmin, async (req, res) => {
-    const result = await crmManager.disconnect(req.user.companyId);
-    res.json(result);
+    try {
+      const result = await crmManager.disconnect(req.user.companyId);
+      res.json(result);
+    } catch (err) {
+      console.error('[crm/disconnect] Error:', err);
+      res.status(500).json({ error: 'Failed to disconnect CRM' });
+    }
   });
 
   // Sync specific entity
@@ -736,7 +761,8 @@ export function mountCRMRoutes(app, crmManager, authenticate, requireAdmin) {
       const result = await crmManager.syncClient(req.user.companyId, req.params.clientId);
       res.json(result);
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.error('[crm/sync/client] Error:', err);
+      res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Internal error' : err.message });
     }
   });
 
@@ -745,7 +771,8 @@ export function mountCRMRoutes(app, crmManager, authenticate, requireAdmin) {
       const result = await crmManager.syncProject(req.user.companyId, req.params.projectId);
       res.json(result);
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.error('[crm/sync/project] Error:', err);
+      res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Internal error' : err.message });
     }
   });
 
@@ -754,7 +781,8 @@ export function mountCRMRoutes(app, crmManager, authenticate, requireAdmin) {
       const result = await crmManager.syncEstimate(req.user.companyId, req.params.estimateId);
       res.json(result);
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.error('[crm/sync/estimate] Error:', err);
+      res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Internal error' : err.message });
     }
   });
 
@@ -764,17 +792,23 @@ export function mountCRMRoutes(app, crmManager, authenticate, requireAdmin) {
       const result = await crmManager.syncFullProject(req.user.companyId, req.params.projectId);
       res.json(result);
     } catch (err) {
-      res.status(500).json({ error: err.message });
+      console.error('[crm/sync/full] Error:', err);
+      res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Internal error' : err.message });
     }
   });
 
   // Get sync log
   app.get('/api/crm/sync-log', authenticate, async (req, res) => {
-    const logs = await crmManager.db.getMany(
-      `SELECT * FROM crm_sync_log WHERE company_id = $1 ORDER BY created_at DESC LIMIT 50`,
-      [req.user.companyId]
-    );
-    res.json(logs);
+    try {
+      const logs = await crmManager.db.getMany(
+        `SELECT * FROM crm_sync_log WHERE company_id = $1 ORDER BY created_at DESC LIMIT 50`,
+        [req.user.companyId]
+      );
+      res.json(logs);
+    } catch (err) {
+      console.error('[crm/sync-log] Error:', err);
+      res.status(500).json({ error: 'Failed to retrieve sync log' });
+    }
   });
 
   // Available CRM providers

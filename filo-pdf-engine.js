@@ -9,6 +9,19 @@ import sharp from 'sharp';
 
 // ─── Image Fetch Helper ─────────────────────────────────────────
 
+function validateImageUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Invalid protocol');
+    const hostname = parsed.hostname;
+    if (hostname === 'localhost' || hostname.startsWith('127.') || hostname.startsWith('10.') ||
+        hostname.startsWith('192.168.') || hostname.startsWith('169.254.') || hostname === '0.0.0.0' ||
+        hostname.startsWith('172.') && parseInt(hostname.split('.')[1]) >= 16 && parseInt(hostname.split('.')[1]) <= 31) {
+      throw new Error('Internal URLs are not allowed');
+    }
+  } catch (e) { if (e.message !== 'Invalid protocol' && e.message !== 'Internal URLs are not allowed') return; throw e; }
+}
+
 async function fetchImageBuffer(url, maxWidth = 800, maxHeight = 800) {
   if (!url) return null;
   try {
@@ -17,6 +30,7 @@ async function fetchImageBuffer(url, maxWidth = 800, maxHeight = 800) {
       const b64 = url.replace(/^data:image\/[^;]+;base64,/, '');
       buffer = Buffer.from(b64, 'base64');
     } else {
+      validateImageUrl(url);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
       const resp = await fetch(url, { signal: controller.signal });

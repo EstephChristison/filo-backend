@@ -23,7 +23,7 @@ import OpenAI from 'openai';
 import { GoogleGenAI } from '@google/genai';
 import { createAIHandler } from './filo-ai-pipeline.js';
 import CRMManager, { mountCRMRoutes } from './filo-crm-framework.js';
-import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 import StripeManager, { mountStripeRoutes } from './filo-stripe-module.js';
 import { createPDFEngine } from './filo-pdf-engine.js';
 
@@ -63,12 +63,9 @@ const config = {
     apiKey: process.env.OPENAI_API_KEY,
     model: process.env.GPT_MODEL || 'gpt-4o',
   },
-  email: {
-    host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT || '587'),
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-    from: process.env.SMTP_FROM || 'FILO <noreply@myfilocrm.com>',
+  resend: {
+    apiKey: process.env.RESEND_API_KEY,
+    from: process.env.EMAIL_FROM || 'FILO <noreply@myfilocrm.com>',
   },
 };
 
@@ -76,6 +73,27 @@ const config = {
 
 const pool = new pg.Pool(config.database);
 const stripe = config.stripe.secretKey ? new Stripe(config.stripe.secretKey) : null;
+const resend = config.resend.apiKey ? new Resend(config.resend.apiKey) : null;
+
+// ─── Email Helper ───────────────────────────────────────────────
+
+async function sendEmail(to, subject, html) {
+  if (!resend) {
+    console.log(`[EMAIL] (no Resend key) To: ${to} | Subject: ${subject}`);
+    return;
+  }
+  try {
+    await resend.emails.send({
+      from: config.resend.from,
+      to,
+      subject,
+      html,
+    });
+    console.log(`[EMAIL] Sent to ${to}: ${subject}`);
+  } catch (err) {
+    console.error(`[EMAIL] Failed to send to ${to}:`, err.message);
+  }
+}
 
 // ─── Supabase Storage Helper ────────────────────────────────────
 // Uses Supabase Storage REST API directly (no extra dependency)
@@ -2422,7 +2440,7 @@ app.post('/api/upload', authenticate, upload.single('file'), async (req, res) =>
     const dbFile = await db.getOne(
       `INSERT INTO files (company_id, uploaded_by, file_type, original_name, s3_key, s3_bucket, cdn_url, mime_type, file_size)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.user.companyId, req.user.userId, fileType, file.originalname, key, 'supabase', cdnUrl, file.mimetype, file.size]
+      [req.user.companyId, req.user.userId, fileType, sanitizeFilename(file.originalname), key, 'supabase', cdnUrl, file.mimetype, file.size]
     );
 
     res.status(201).json(dbFile);
@@ -2464,7 +2482,7 @@ app.post('/api/upload/photos/:areaId', authenticate, upload.array('photos', 20),
       const dbFile = await db.getOne(
         `INSERT INTO files (company_id, uploaded_by, file_type, original_name, s3_key, s3_bucket, cdn_url, mime_type, file_size)
          VALUES ($1, $2, 'photo', $3, $4, $5, $6, $7, $8) RETURNING *`,
-        [req.user.companyId, req.user.userId, file.originalname, key, 'supabase', cdnUrl, file.mimetype, file.size]
+        [req.user.companyId, req.user.userId, sanitizeFilename(file.originalname), key, 'supabase', cdnUrl, file.mimetype, file.size]
       );
 
       const photo = await db.getOne(
@@ -5032,6 +5050,36 @@ app.get('/api/files/:fileId/download', authenticate, async (req, res) => {
   }
 });
 
+// ─── Public Checkout (Landing Page — no auth required) ───────────
+
+app.post('/api/public/checkout', async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const { email, companyName, successUrl, cancelUrl } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    const priceId = config.stripe.basePriceId;
+    if (!priceId) return res.status(503).json({ error: 'Stripe price not configured' });
+
+    const session = await stripe.checkout.sessions.create({
+      customer_email: email,
+      mode: 'subscription',
+      line_items: [{ price: priceId, quantity: 1 }],
+      subscription_data: {
+        trial_period_days: 14,
+        metadata: { source: 'landing_page', company_name: companyName || '' },
+      },
+      success_url: successUrl || `${process.env.FRONTEND_URL || 'https://app.myfilocrm.com'}?billing=success`,
+      cancel_url: cancelUrl || `${process.env.APP_URL || 'https://myfilocrm.com'}`,
+    });
+
+    res.json({ sessionId: session.id, url: session.url });
+  } catch (err) {
+    console.error('[public/checkout] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Health Check ────────────────────────────────────────────────
 
 app.get('/api/health', async (req, res) => {
@@ -5112,6 +5160,11 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('[UnhandledRejection] Promise:', promise);
   console.error('[UnhandledRejection] Reason:', reason);
   // Do NOT crash — Express error handler should have caught this
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+  process.exit(1);
 });
 
 // ─── Start Server ────────────────────────────────────────────────

@@ -598,8 +598,10 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
 
   // Get subscription status
   app.get('/api/billing/status', authenticate, async (req, res) => {
-    const status = await stripeManager.getSubscriptionStatus(req.user.companyId);
-    res.json(status);
+    try {
+      const status = await stripeManager.getSubscriptionStatus(req.user.companyId);
+      res.json(status);
+    } catch (err) { res.status(500).json({ error: 'Failed to load billing status' }); }
   });
 
   // Create subscription (with payment method)
@@ -615,60 +617,78 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
 
   // Create Checkout Session (redirect to Stripe)
   app.post('/api/billing/checkout', authenticate, requireAdmin, async (req, res) => {
-    const { successUrl, cancelUrl } = req.body;
-    const session = await stripeManager.createCheckoutSession(req.user.companyId, successUrl, cancelUrl);
-    res.json(session);
+    try {
+      const { successUrl, cancelUrl } = req.body;
+      const session = await stripeManager.createCheckoutSession(req.user.companyId, successUrl, cancelUrl);
+      res.json(session);
+    } catch (err) { res.status(400).json({ error: err.message }); }
   });
 
   // Billing portal (manage payment methods, invoices)
   app.post('/api/billing/portal', authenticate, requireAdmin, async (req, res) => {
-    const { returnUrl } = req.body;
-    const session = await stripeManager.createBillingPortalSession(req.user.companyId, returnUrl);
-    res.json(session);
+    try {
+      const { returnUrl } = req.body;
+      const session = await stripeManager.createBillingPortalSession(req.user.companyId, returnUrl);
+      res.json(session);
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   // Update payment method
   app.put('/api/billing/payment-method', authenticate, requireAdmin, async (req, res) => {
-    const { paymentMethodId } = req.body;
-    await stripeManager.updateCustomerPaymentMethod(req.user.companyId, paymentMethodId);
-    res.json({ success: true });
+    try {
+      const { paymentMethodId } = req.body;
+      await stripeManager.updateCustomerPaymentMethod(req.user.companyId, paymentMethodId);
+      res.json({ success: true });
+    } catch (err) { res.status(400).json({ error: err.message }); }
   });
 
   // Cancel subscription
   app.post('/api/billing/cancel', authenticate, requireAdmin, async (req, res) => {
-    const { immediate } = req.body;
-    const result = await stripeManager.cancelSubscription(req.user.companyId, immediate);
-    res.json(result);
+    try {
+      const { immediate } = req.body;
+      const result = await stripeManager.cancelSubscription(req.user.companyId, immediate);
+      res.json(result);
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   // Reactivate subscription
   app.post('/api/billing/reactivate', authenticate, requireAdmin, async (req, res) => {
-    const result = await stripeManager.reactivateSubscription(req.user.companyId);
-    res.json(result);
+    try {
+      const result = await stripeManager.reactivateSubscription(req.user.companyId);
+      res.json(result);
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   // Pause subscription (admin/FILO staff only in practice)
   app.post('/api/billing/pause', authenticate, requireAdmin, async (req, res) => {
-    const result = await stripeManager.pauseSubscription(req.user.companyId);
-    res.json(result);
+    try {
+      const result = await stripeManager.pauseSubscription(req.user.companyId);
+      res.json(result);
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   // Resume subscription
   app.post('/api/billing/resume', authenticate, requireAdmin, async (req, res) => {
-    const result = await stripeManager.resumeSubscription(req.user.companyId);
-    res.json(result);
+    try {
+      const result = await stripeManager.resumeSubscription(req.user.companyId);
+      res.json(result);
+    } catch (err) { res.status(500).json({ error: err.message }); }
   });
 
   // Get invoices
   app.get('/api/billing/invoices', authenticate, async (req, res) => {
-    const invoices = await stripeManager.getInvoices(req.user.companyId);
-    res.json(invoices);
+    try {
+      const invoices = await stripeManager.getInvoices(req.user.companyId);
+      res.json(invoices);
+    } catch (err) { res.status(500).json({ error: 'Failed to load invoices' }); }
   });
 
   // Get upcoming invoice
   app.get('/api/billing/upcoming', authenticate, async (req, res) => {
-    const invoice = await stripeManager.getUpcomingInvoice(req.user.companyId);
-    res.json(invoice);
+    try {
+      const invoice = await stripeManager.getUpcomingInvoice(req.user.companyId);
+      res.json(invoice);
+    } catch (err) { res.status(500).json({ error: 'Failed to load upcoming invoice' }); }
   });
 
   // Add user (triggers Stripe proration)

@@ -5,7 +5,6 @@
 // ═══════════════════════════════════════════════════════════════════
 
 import OpenAI from 'openai';
-import Replicate from 'replicate';
 
 // ─── Configuration ───────────────────────────────────────────────
 
@@ -20,7 +19,6 @@ const config = {
 
 // Defer instantiation — only create if key is present, avoids crash at import time
 const openai = config.openaiKey ? new OpenAI({ apiKey: config.openaiKey, timeout: 120_000 }) : null;
-const replicate = config.replicateToken ? new Replicate({ auth: config.replicateToken }) : null;
 
 // ─── System Prompts ──────────────────────────────────────────────
 
@@ -151,8 +149,9 @@ Be thorough. Real nursery lists often have inconsistent formatting, abbreviation
 // ═══════════════════════════════════════════════════════════════════
 
 export default class AIService {
-  constructor(db) {
+  constructor(db, storage) {
     this.db = db;
+    this.storage = storage;
   }
 
   // ─── Plant Detection (Step 4) ──────────────────────────────────
@@ -298,12 +297,28 @@ export default class AIService {
         location,
       });
 
-      // Step 4: Update design record
+      // Step 4: Upload rendering to storage if it's base64 (avoid storing blobs in DB)
+      let renderingUrl = rendering.url || null;
+      if (renderingUrl && renderingUrl.startsWith('data:image/') && this.storage) {
+        try {
+          const base64Data = renderingUrl.split(',')[1];
+          const buffer = Buffer.from(base64Data, 'base64');
+          const storagePath = `renders/${designId}/${Date.now()}.png`;
+          await this.storage.upload(storagePath, buffer, 'image/png');
+          renderingUrl = this.storage.getPublicUrl(storagePath);
+          console.log(`[AI:generateDesign] Uploaded rendering to storage: ${storagePath}`);
+        } catch (uploadErr) {
+          console.error('[AI:generateDesign] Storage upload failed, keeping data URL:', uploadErr.message);
+        }
+      } else if (renderingUrl && renderingUrl.startsWith('data:image/')) {
+        console.warn('[AI:generateDesign] No storage configured — base64 stored in DB (not recommended for production)');
+      }
+
       const designData = {
         plant_placements: placements,
         services_recommended: plantPlan.data.services_recommended,
         design_summary: plantPlan.data.design_summary,
-        rendering_url: rendering.url || null,
+        rendering_url: renderingUrl,
       };
 
       await this.db.query(
@@ -316,7 +331,7 @@ export default class AIService {
           rendering.success ? 'completed' : 'completed_no_render',
           JSON.stringify(placements),
           JSON.stringify(designData),
-          rendering.url,
+          renderingUrl,
           `${config.gptModel} + ${config.imageProvider}`,
           designId,
         ]
@@ -326,7 +341,7 @@ export default class AIService {
         success: true,
         designId,
         plantCount: placements.length,
-        renderingUrl: rendering.url,
+        renderingUrl,
         planData: plantPlan.data,
         renderingProvider: config.imageProvider,
       };
@@ -412,7 +427,7 @@ Create a complete plant placement plan using ONLY plants from the available inve
     const prompt = `Ultra-photorealistic photograph of a beautifully landscaped residential front yard. ${styleDescriptions[designStyle] || styleDescriptions.naturalistic}. Features these specific plants: ${plantList}. Ground covers and low plants in the foreground, medium shrubs in the middle, taller plants and trees in the background. ${sunExposure === 'full_sun' ? 'Bright natural daylight with warm shadows' : sunExposure === 'partial_shade' ? 'Dappled sunlight filtering through trees' : 'Soft shaded lighting under tree canopy'}. Professional landscape photography, 85mm lens, golden hour lighting. The home architecture is visible in the background. Fresh mulch bed borders. ${location?.state === 'TX' ? 'South Texas residential neighborhood' : 'Suburban American neighborhood'}.`;
 
     try {
-      if (config.imageProvider === 'replicate' && replicate) {
+      if (config.imageProvider === 'replicate' && config.replicateToken) {
         return await this.generateWithReplicate(prompt, photoUrl);
       }
       return await this.generateWithDalle(prompt);
@@ -420,7 +435,7 @@ Create a complete plant placement plan using ONLY plants from the available inve
       console.error(`[AI:generateRendering] ${config.imageProvider} failed:`, err);
 
       // Fallback: try the other provider
-      if (config.imageProvider === 'dalle' && replicate) {
+      if (config.imageProvider === 'dalle' && config.replicateToken) {
         console.log('[AI:generateRendering] Falling back to Replicate...');
         try {
           return await this.generateWithReplicate(prompt, photoUrl);
@@ -448,8 +463,21 @@ Create a complete plant placement plan using ONLY plants from the available inve
     const resultData = response.data[0];
     let imageUrl;
     if (resultData.b64_json) {
-      // gpt-image-1 returns b64_json by default — convert to data URL
-      imageUrl = `data:image/png;base64,${resultData.b64_json}`;
+      // gpt-image-1 returns b64_json by default — upload to storage to avoid DB bloat
+      if (this.storage) {
+        try {
+          const buffer = Buffer.from(resultData.b64_json, 'base64');
+          const storagePath = `renders/dalle/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`;
+          await this.storage.upload(storagePath, buffer, 'image/png');
+          imageUrl = this.storage.getPublicUrl(storagePath);
+          console.log(`[AI:generateWithDalle] Uploaded to storage: ${storagePath}`);
+        } catch (uploadErr) {
+          console.error('[AI:generateWithDalle] Storage upload failed, falling back to data URL:', uploadErr.message);
+          imageUrl = `data:image/png;base64,${resultData.b64_json}`;
+        }
+      } else {
+        imageUrl = `data:image/png;base64,${resultData.b64_json}`;
+      }
     } else {
       imageUrl = resultData.url;
     }
@@ -462,6 +490,10 @@ Create a complete plant placement plan using ONLY plants from the available inve
   }
 
   async generateWithReplicate(prompt, referencePhotoUrl) {
+    // Dynamic import — avoids crashing the module if 'replicate' isn't installed
+    const { default: Replicate } = await import('replicate');
+    const replicate = new Replicate({ auth: config.replicateToken });
+
     // Use SDXL for high-quality landscape rendering
     const output = await replicate.run(
       'stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b',
@@ -729,8 +761,8 @@ ${typeof content === 'string' ? content.substring(0, 15000) : JSON.stringify(con
 // Replace callManusAI() in filo-api-server.js with this:
 // ═══════════════════════════════════════════════════════════════════
 
-export function createAIHandler(db) {
-  const ai = new AIService(db);
+export function createAIHandler(db, storage) {
+  const ai = new AIService(db, storage);
 
   return async function callAI(taskType, data) {
     switch (taskType) {
@@ -764,11 +796,16 @@ export function createAIHandler(db) {
 // EXPRESS ROUTES (mount for job polling status)
 // ═══════════════════════════════════════════════════════════════════
 
-export function mountAIRoutes(app, aiService, authenticate) {
-  // Manual trigger to process queued jobs (for development/debugging)
-  app.post('/api/ai/process-queue', authenticate, async (req, res) => {
-    const results = await aiService.processQueuedJobs(req.body.limit || 5);
-    res.json({ processed: results.length, results });
+export function mountAIRoutes(app, aiService, authenticate, requireAdmin) {
+  // Manual trigger to process queued jobs (admin only, for development/debugging)
+  app.post('/api/ai/process-queue', authenticate, requireAdmin, async (req, res) => {
+    try {
+      const results = await aiService.processQueuedJobs(req.body.limit || 5);
+      res.json({ processed: results.length, results });
+    } catch (err) {
+      console.error('[ai/process-queue] Error:', err);
+      res.status(500).json({ error: 'Failed to process AI queue' });
+    }
   });
 
   // Get AI service health
