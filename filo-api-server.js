@@ -23,14 +23,23 @@ import OpenAI from 'openai';
 import { GoogleGenAI } from '@google/genai';
 import { createAIHandler } from './filo-ai-pipeline.js';
 import CRMManager, { mountCRMRoutes } from './filo-crm-framework.js';
+import nodemailer from 'nodemailer';
+import StripeManager, { mountStripeRoutes } from './filo-stripe-module.js';
+import { createPDFEngine } from './filo-pdf-engine.js';
 
 // ─── Configuration ───────────────────────────────────────────────
 
 const config = {
   port: process.env.PORT || 4000,
   nodeEnv: process.env.NODE_ENV || 'development',
-  jwtSecret: process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' ? null : 'filo-dev-secret-local-only'),
-  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || (process.env.NODE_ENV === 'production' ? null : 'filo-refresh-secret-local-only'),
+  jwtSecret: process.env.JWT_SECRET || (() => {
+    console.warn('WARNING: JWT_SECRET not set — using insecure dev-only fallback. You MUST set JWT_SECRET in production!');
+    return 'INSECURE_DEV_ONLY_jwt_access_secret_k7G4pXrM2vL9qW8nT3bY6dF1hJ5sA0cE_CHANGE_ME_IN_PROD';
+  })(),
+  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || (() => {
+    console.warn('WARNING: JWT_REFRESH_SECRET not set — using insecure dev-only fallback. You MUST set JWT_REFRESH_SECRET in production!');
+    return 'INSECURE_DEV_ONLY_jwt_refresh_secret_R8mN3wQ6xP1vK4tB7yH2jU9fL5gD0aS_CHANGE_ME_IN_PROD';
+  })(),
   jwtExpiry: '2h',
   jwtRefreshExpiry: '7d',
   database: {
@@ -53,6 +62,13 @@ const config = {
   openai: {
     apiKey: process.env.OPENAI_API_KEY,
     model: process.env.GPT_MODEL || 'gpt-4o',
+  },
+  email: {
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT || '587'),
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+    from: process.env.SMTP_FROM || 'FILO <noreply@myfilocrm.com>',
   },
 };
 
@@ -147,6 +163,12 @@ const upload = multer({
   },
 });
 
+// ─── Safe Error Responses ───────────────────────────────────────
+// Never leak internal error details (stack traces, DB info, API keys) to clients.
+function safeErrorMessage(_err) {
+  return 'An internal error occurred. Please try again.';
+}
+
 // ─── Input Sanitization ──────────────────────────────────────────
 // Strips HTML tags from string inputs to prevent stored XSS.
 // Applied at all user-facing string boundaries.
@@ -157,6 +179,13 @@ function stripHtml(value) {
 
 // Sanitize a filename for use in storage key paths — strips path traversal sequences
 // and characters that could escape the intended directory prefix.
+function parsePagination(query) {
+  const page = Math.max(1, Math.min(1000, parseInt(query.page, 10) || 1));
+  const limit = Math.max(1, Math.min(200, parseInt(query.limit, 10) || 50));
+  const offset = (page - 1) * limit;
+  return { page, limit, offset };
+}
+
 function sanitizeFilename(name) {
   if (typeof name !== 'string') return 'upload';
   return name
@@ -186,7 +215,6 @@ function validateUrlForSSRF(url) {
     if (parsed.protocol !== 'https:') return 'Only HTTPS URLs are allowed';
     const allowedHosts = [
       config.supabaseStorage.url.replace(/^https?:\/\//, ''),
-      'yxgwtrbbczgffrzmjahe.supabase.co',
     ];
     const isAllowed = allowedHosts.some(h => parsed.hostname === h || parsed.hostname.endsWith('.' + h));
     if (!isAllowed) return 'URL must be a Supabase Storage URL';
@@ -251,20 +279,29 @@ app.set('trust proxy', 1); // Trust Railway's reverse proxy for rate limiting + 
 // Stripe webhook needs raw body — must come before json parser
 app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), handleStripeWebhook);
 
-app.use(helmet());
+app.use(helmet({
+  contentSecurityPolicy: false, // CSP managed by Vercel for frontend; API returns JSON only
+  crossOriginEmbedderPolicy: false, // Allow cross-origin image loading for AI renders
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+}));
+const PROD_ORIGINS = [
+  'https://app.myfilocrm.com',
+  'https://myfilocrm.com',
+  'https://filo-app-five.vercel.app',
+  'https://filo-app-estephchristisons-projects.vercel.app',
+];
+const DEV_ORIGINS = ['http://localhost:3000', 'http://localhost:5173'];
+const corsOrigins = config.nodeEnv === 'production'
+  ? [...PROD_ORIGINS]
+  : [...PROD_ORIGINS, ...DEV_ORIGINS];
+if (process.env.FRONTEND_URL && !corsOrigins.includes(process.env.FRONTEND_URL)) {
+  corsOrigins.push(process.env.FRONTEND_URL);
+}
 app.use(cors({
-  origin: [
-    process.env.FRONTEND_URL || 'http://localhost:3000',
-    'https://app.myfilocrm.com',
-    'https://myfilocrm.com',
-    'https://filo-app-five.vercel.app',
-    'https://filo-app-estephchristisons-projects.vercel.app',
-    'http://localhost:3000',
-    'http://localhost:5173',
-  ],
+  origin: corsOrigins,
   credentials: true,
 }));
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '5mb' }));
 app.use(morgan('combined'));
 
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false });
@@ -326,7 +363,7 @@ async function requireActiveSubscription(req, res, next) {
     next();
   } catch (err) {
     console.error('[requireActiveSubscription] DB error:', err.message);
-    next(); // Fail open — don't lock out users due to DB issues
+    return res.status(503).json({ error: 'Unable to verify subscription. Please try again.' });
   }
 }
 
@@ -348,7 +385,7 @@ function validateUUID(...paramNames) {
 // Applied after app is created — validates all :id, :lineItemId route params
 // This prevents PostgreSQL UUID cast errors from causing 502s
 function registerUUIDParamValidation(app) {
-  for (const param of ['id', 'lineItemId', 'fileId', 'projectId', 'clientId', 'companyId', 'userId']) {
+  for (const param of ['id', 'lineItemId', 'fileId', 'projectId', 'clientId', 'companyId', 'userId', 'areaId', 'designId', 'revisionId']) {
     app.param(param, (req, res, next, val) => {
       if (!UUID_RE.test(val)) {
         return res.status(400).json({ error: `Invalid ${param}: must be a valid UUID` });
@@ -570,7 +607,7 @@ app.post('/api/auth/invite', authenticateOnly, requireAdmin, async (req, res) =>
     const email = (req.body.email || '').trim().toLowerCase();
     const firstName = stripHtml(req.body.firstName);
     const lastName = stripHtml(req.body.lastName);
-    const VALID_ROLES = ['admin', 'estimator', 'designer', 'viewer'];
+    const VALID_ROLES = ['admin', 'estimator'];
     const role = VALID_ROLES.includes(req.body.role) ? req.body.role : 'estimator';
     if (!email || !firstName || !lastName) return res.status(400).json({ error: 'email, firstName, and lastName are required' });
     const inviteToken = uuidv4();
@@ -583,7 +620,15 @@ app.post('/api/auth/invite', authenticateOnly, requireAdmin, async (req, res) =>
     );
 
     const inviteLink = `${process.env.FRONTEND_URL || 'https://app.myfilocrm.com'}/invite/${inviteToken}`;
-    res.status(201).json({ message: 'Invite created. Share the link with the user.', inviteToken, inviteLink });
+    const inviterUser = await db.getOne('SELECT first_name, last_name FROM users WHERE id = $1', [req.user.userId]);
+    const company = await db.getOne('SELECT name FROM companies WHERE id = $1', [req.user.companyId]);
+    await sendEmail(email, `You're invited to ${company?.name || 'FILO'}`, `
+      <h2>You've been invited!</h2>
+      <p>${inviterUser?.first_name || 'A team member'} at ${company?.name || 'a company'} has invited you to FILO.</p>
+      <p><a href="${inviteLink}">Accept Invitation</a></p>
+      <p>This link expires in 7 days.</p>
+    `);
+    res.status(201).json({ message: 'Invite created and email sent.', inviteToken, inviteLink });
   } catch (err) {
     console.error('Invite error:', err);
     res.status(500).json({ error: 'Failed to invite user' });
@@ -591,7 +636,7 @@ app.post('/api/auth/invite', authenticateOnly, requireAdmin, async (req, res) =>
 });
 
 // ─── Accept Invite ───────────────────────────────────────────────
-app.post('/api/auth/accept-invite', async (req, res) => {
+app.post('/api/auth/accept-invite', authLimiter, async (req, res) => {
   try {
     const { inviteToken, password } = req.body;
     if (!inviteToken || !password) return res.status(400).json({ error: 'inviteToken and password are required' });
@@ -652,7 +697,13 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
         'UPDATE users SET recovery_token = $1, recovery_sent_at = $2 WHERE id = $3',
         [token, expires, user.id]
       );
-      // TODO: Send actual email when email provider is configured
+      const resetLink = `${process.env.FRONTEND_URL || 'https://app.myfilocrm.com'}/reset-password/${token}`;
+      await sendEmail(user.email, 'Reset your FILO password', `
+        <h2>Password Reset</h2>
+        <p>Click the link below to reset your password. This link expires in 1 hour.</p>
+        <p><a href="${resetLink}">${resetLink}</a></p>
+        <p>If you didn't request this, you can safely ignore this email.</p>
+      `);
       console.log(`[PASSWORD RESET] Reset requested for user ${user.id} (expires ${expires.toISOString()})`);
     }
     res.json({ message: 'If an account with that email exists, a reset link has been sent.' });
@@ -779,13 +830,16 @@ app.put('/api/company', authenticateOnly, requireAdmin, async (req, res) => {
       }
     }
 
+    const stringFields = ['name', 'phone', 'email', 'website', 'address_line1', 'address_line2',
+      'city', 'state', 'zip', 'country', 'license_number', 'tagline', 'credentials',
+      'default_terms', 'warranty_terms'];
     const updates = [];
     const values = [];
     let idx = 1;
     for (const key of allowed) {
       if (fields[key] !== undefined) {
         updates.push(`${key} = $${idx}`);
-        values.push(fields[key]);
+        values.push(stringFields.includes(key) ? stripHtml(String(fields[key])) : fields[key]);
         idx++;
       }
     }
@@ -810,17 +864,17 @@ app.put('/api/company/onboarding', authenticateOnly, requireAdmin, async (req, r
     await db.query('UPDATE companies SET onboarding_completed = true WHERE id = $1', [req.user.companyId]);
     res.json({ message: 'Onboarding completed', onboardingCompleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
 // --- Issue 5 fix: Add POST /api/onboarding/complete as an alternative endpoint ---
-app.post('/api/onboarding/complete', authenticateOnly, async (req, res) => {
+app.post('/api/onboarding/complete', authenticateOnly, requireAdmin, async (req, res) => {
   try {
     await db.query('UPDATE companies SET onboarding_completed = true WHERE id = $1', [req.user.companyId]);
     res.json({ message: 'Onboarding completed', onboardingCompleted: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -830,8 +884,8 @@ app.post('/api/onboarding/complete', authenticateOnly, async (req, res) => {
 
 app.get('/api/clients', authenticate, async (req, res) => {
   try {
-    const { search, page = 1, limit = 50 } = req.query;
-    const offset = (page - 1) * limit;
+    const { search } = req.query;
+    const { page, limit, offset } = parsePagination(req.query);
     let query = 'SELECT * FROM clients WHERE company_id = $1';
     const params = [req.user.companyId];
 
@@ -931,7 +985,17 @@ app.get('/api/clients/:id', authenticate, async (req, res) => {
 
 app.put('/api/clients/:id', authenticate, async (req, res) => {
   try {
-    const fields = req.body;
+    const raw = req.body;
+    // Accept camelCase from frontend, map to snake_case for DB
+    const camelToSnake = {
+      displayName: 'display_name', firstName: 'first_name', lastName: 'last_name',
+      addressLine1: 'address_line1', addressLine2: 'address_line2',
+      companyName: 'company_name',
+    };
+    const fields = {};
+    for (const [k, v] of Object.entries(raw)) {
+      fields[camelToSnake[k] || k] = v;
+    }
     const allowed = ['display_name', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'notes'];
     const stringFields = ['display_name', 'first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'notes'];
     const updates = [], values = [];
@@ -1138,7 +1202,7 @@ Be thorough. Real client lists have inconsistent formatting, missing fields, and
     });
   } catch (err) {
     console.error('[clients/import] Error:', err.message);
-    res.status(500).json({ error: `Import failed: ${err.message}` });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -1148,7 +1212,8 @@ Be thorough. Real client lists have inconsistent formatting, missing fields, and
 
 app.get('/api/projects', authenticate, async (req, res) => {
   try {
-    const { status, clientId, page = 1, limit = 50 } = req.query;
+    const { status, clientId } = req.query;
+    const { page, limit, offset } = parsePagination(req.query);
     let query = 'SELECT * FROM v_active_projects WHERE company_id = $1';
     const params = [req.user.companyId];
 
@@ -1156,7 +1221,7 @@ app.get('/api/projects', authenticate, async (req, res) => {
     if (clientId) { params.push(clientId); query += ` AND client_id = $${params.length}`; }
 
     query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-    params.push(limit, (page - 1) * limit);
+    params.push(limit, offset);
 
     const projects = await db.getMany(query, params);
     res.json({ projects });
@@ -1171,15 +1236,15 @@ app.post('/api/projects', authenticate, async (req, res) => {
     const b = req.body;
     // Accept both camelCase and snake_case field names from frontend
     const clientId = b.clientId || b.client_id;
-    const name = b.name;
+    const name = stripHtml(b.name);
     const areas = b.areas;
     const sunExposure = b.sunExposure || b.sun_exposure || null;
     const designStyle = b.designStyle || b.design_style || null;
-    const specialRequests = b.specialRequests || b.special_requests || null;
+    const specialRequests = stripHtml(b.specialRequests || b.special_requests || null);
     const lightingRequested = b.lightingRequested || b.lighting_requested || false;
-    const lightingTypes = b.lightingTypes || b.lighting_types || null;
-    const hardscapeChanges = b.hardscapeChanges || b.hardscape_changes || null;
-    const hardscapeNotes = b.hardscapeNotes || b.hardscape_notes || null;
+    const lightingTypes = stripHtml(b.lightingTypes || b.lighting_types || null);
+    const hardscapeChanges = stripHtml(b.hardscapeChanges || b.hardscape_changes || null);
+    const hardscapeNotes = stripHtml(b.hardscapeNotes || b.hardscape_notes || null);
 
     if (!clientId) return res.status(400).json({ error: 'client_id is required' });
     if (!UUID_RE.test(clientId)) return res.status(400).json({ error: 'Invalid clientId: must be a valid UUID' });
@@ -1285,6 +1350,12 @@ app.put('/api/projects/:id', authenticate, async (req, res) => {
       else fields.sun_exposure = fields.sun_exposure.toLowerCase().replace(/\s+/g, '_');
     }
     const allowed = ['name', 'status', 'sun_exposure', 'design_style', 'special_requests', 'lighting_requested', 'lighting_types', 'hardscape_changes', 'hardscape_notes'];
+    const projStringFields = ['name', 'special_requests', 'lighting_types', 'hardscape_changes', 'hardscape_notes'];
+    for (const key of projStringFields) {
+      if (fields[key] !== undefined && typeof fields[key] === 'string') {
+        fields[key] = stripHtml(fields[key]);
+      }
+    }
     const updates = [], values = [];
     let idx = 1;
     for (const key of allowed) {
@@ -1298,8 +1369,8 @@ app.put('/api/projects/:id', authenticate, async (req, res) => {
   } catch (err) {
     console.error('PUT /api/projects/:id error:', err.message, '| code:', err.code, '| detail:', err.detail);
     if (err.code === '22001') return res.status(400).json({ error: 'One or more fields exceed maximum length' });
-    if (err.code === '22P02') return res.status(400).json({ error: `Invalid value for a field: ${err.message}` });
-    res.status(500).json({ error: `Failed to update project: ${err.message}` });
+    if (err.code === '22P02') return res.status(400).json({ error: 'Invalid value for a field' });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -1360,7 +1431,7 @@ app.post('/api/projects/:projectId/areas', authenticate, async (req, res) => {
       'left': 'side_yard_left', 'right': 'side_yard_right',
     };
     const areaType = AREA_TYPE_MAP[rawType] || 'custom';
-    const customName = b.customName || b.name || b.custom_name || rawType;
+    const customName = stripHtml(b.customName || b.name || b.custom_name || rawType);
 
     const area = await db.getOne(
       `INSERT INTO property_areas (project_id, area_type, custom_name) VALUES ($1, $2, $3) RETURNING *`,
@@ -1412,12 +1483,12 @@ app.post('/api/areas/:areaId/existing-plants', authenticate, async (req, res) =>
     const plant = await db.getOne(
       `INSERT INTO existing_plants (property_area_id, identified_name, confidence, position_x, position_y, mark, comment)
        VALUES ($1, $2, 1.0, $3, $4, $5, $6) RETURNING *`,
-      [req.params.areaId, name.trim(), position_x || 0.5, position_y || 0.5, mark || 'keep', comment || 'Manually added']
+      [req.params.areaId, stripHtml(name.trim()), position_x || 0.5, position_y || 0.5, mark || 'keep', stripHtml(comment || 'Manually added')]
     );
     res.status(201).json(plant);
   } catch (err) {
     console.error('Manual plant add error:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -1465,13 +1536,15 @@ app.put('/api/existing-plants/:id/mark', authenticate, async (req, res) => {
     let plant;
     if (rename && rename.trim()) {
       plant = await db.getOne(
-        'UPDATE existing_plants SET mark = $1, identified_name = $2 WHERE id = $3 RETURNING *',
-        [mark, stripHtml(rename.trim()), req.params.id]
+        `UPDATE existing_plants SET mark = $1, identified_name = $2 WHERE id = $3
+         AND property_area_id IN (SELECT pa.id FROM property_areas pa JOIN projects p ON p.id = pa.project_id WHERE p.company_id = $4) RETURNING *`,
+        [mark, stripHtml(rename.trim()), req.params.id, req.user.companyId]
       );
     } else {
       plant = await db.getOne(
-        'UPDATE existing_plants SET mark = $1, comment = $2 WHERE id = $3 RETURNING *',
-        [mark, stripHtml(comment || ''), req.params.id]
+        `UPDATE existing_plants SET mark = $1, comment = $2 WHERE id = $3
+         AND property_area_id IN (SELECT pa.id FROM property_areas pa JOIN projects p ON p.id = pa.project_id WHERE p.company_id = $4) RETURNING *`,
+        [mark, stripHtml(comment || ''), req.params.id, req.user.companyId]
       );
     }
     res.json(plant);
@@ -1483,7 +1556,7 @@ app.put('/api/existing-plants/:id/mark', authenticate, async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════
 // ─── Removal Preview (Gemini — removes plants from photo) ────────
-app.post('/api/removal-preview', authenticate, async (req, res) => {
+app.post('/api/removal-preview', authenticate, aiRateLimit, async (req, res) => {
   try {
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
     const { photoUrl, maskDataUrl } = req.body;
@@ -1590,12 +1663,12 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
     res.json({ previewUrl: resultDataUrl });
   } catch (err) {
     console.error('[removal-preview] Error:', err.message);
-    res.status(500).json({ error: `Removal preview failed: ${err.message}` });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
 // ─── Bed Edge Preview (Gemini — reshape bed perimeter) ──
-app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
+app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) => {
   try {
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
     const { photoUrl, maskDataUrl, edgeStyle, adjustmentFeet } = req.body;
@@ -1781,12 +1854,12 @@ BED EDGE RULES:
     res.json({ previewUrl: resultDataUrl });
   } catch (err) {
     console.error('[bed-edge] Error:', err.message);
-    res.status(500).json({ error: `Bed edge preview failed: ${err.message}` });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
 // ─── Design Render (Gemini — new plants inpainted onto property photo) ──
-app.post('/api/design-render', authenticate, async (req, res) => {
+app.post('/api/design-render', authenticate, aiRateLimit, async (req, res) => {
   try {
     const { photoUrl, designPlants, keptPlants, removedPlants, designStyle, maskDataUrl, plantPins } = req.body;
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
@@ -1937,7 +2010,7 @@ ${removedPlantsDesc ? `3. Do NOT add back any ${removedPlantsDesc}. Those were r
     res.json({ renderUrl: renderDataUrl, prompt: plantDesc });
   } catch (err) {
     console.error('[design-render] Error:', err.message);
-    res.status(500).json({ error: `Design render failed: ${err.message}` });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -1945,7 +2018,7 @@ ${removedPlantsDesc ? `3. Do NOT add back any ${removedPlantsDesc}. Those were r
 // DESIGN ADJUST — pin-based localized edits via Gemini
 // ═══════════════════════════════════════════════════════════════════
 
-app.post('/api/design-adjust', authenticate, async (req, res) => {
+app.post('/api/design-adjust', authenticate, aiRateLimit, async (req, res) => {
   try {
     const { renderDataUrl, pinX, pinY, radius, prompt } = req.body;
     if (!renderDataUrl) return res.status(400).json({ error: 'renderDataUrl is required' });
@@ -2070,12 +2143,12 @@ STRICT RULES:
     res.json({ renderUrl: resultDataUrl });
   } catch (err) {
     console.error('[design-adjust] Error:', err.message);
-    res.status(500).json({ error: `Design adjustment failed: ${err.message}` });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
 // ─── Night Mode (Gemini — convert daytime design to nighttime with landscape lighting) ──
-app.post('/api/design-night-mode', authenticate, async (req, res) => {
+app.post('/api/design-night-mode', authenticate, aiRateLimit, async (req, res) => {
   try {
     const { renderDataUrl } = req.body;
     if (!renderDataUrl) return res.status(400).json({ error: 'renderDataUrl is required' });
@@ -2171,12 +2244,12 @@ The result must look like a professional landscape lighting design photograph ta
     res.json({ renderUrl: resultDataUrl });
   } catch (err) {
     console.error('[night-mode] Error:', err.message);
-    res.status(500).json({ error: `Night mode failed: ${err.message}` });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
 // ─── Hardscape (Gemini — apply hardscape changes to drawn areas) ──
-app.post('/api/design-hardscape', authenticate, async (req, res) => {
+app.post('/api/design-hardscape', authenticate, aiRateLimit, async (req, res) => {
   try {
     const { renderDataUrl, maskDataUrl, prompt } = req.body;
     if (!renderDataUrl) return res.status(400).json({ error: 'renderDataUrl is required' });
@@ -2280,7 +2353,7 @@ CRITICAL — CLEAN SURFACE RULE:
     res.json({ renderUrl: resultDataUrl });
   } catch (err) {
     console.error('[hardscape] Error:', err.message);
-    res.status(500).json({ error: `Hardscape edit failed: ${err.message}` });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -2333,6 +2406,8 @@ app.post('/api/upload', authenticate, upload.single('file'), async (req, res) =>
     const file = req.file;
     if (!file) return res.status(400).json({ error: 'No file received. Use multipart/form-data with field name "file".' });
     if (!fileType) return res.status(400).json({ error: 'fileType is required (photo, logo, document, etc.)' });
+    const VALID_FILE_TYPES = ['photo', 'logo', 'document', 'rendering', 'submittal_pdf', 'estimate_pdf', 'nursery_list'];
+    if (!VALID_FILE_TYPES.includes(fileType)) return res.status(400).json({ error: 'Invalid fileType' });
     const key = `${req.user.companyId}/${fileType}/${uuidv4()}-${sanitizeFilename(file.originalname)}`;
     let cdnUrl;
 
@@ -2466,7 +2541,7 @@ Be thorough but realistic. Only identify plants you can see clearly.`
     res.status(201).json(photos);
   } catch (err) {
     console.error('Photo upload error:', err);
-    res.status(500).json({ error: `Photo upload failed: ${err.message}` });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -2502,7 +2577,8 @@ app.post('/api/upload/presign', authenticate, async (req, res) => {
 
 app.get('/api/plants', authenticate, async (req, res) => {
   try {
-    const { search, category, sun, page = 1, limit = 1000 } = req.query;
+    const { search, category, sun } = req.query;
+    const { page, limit, offset } = parsePagination(req.query);
     let query = 'SELECT * FROM plant_library WHERE company_id = $1';
     const params = [req.user.companyId];
 
@@ -2511,7 +2587,7 @@ app.get('/api/plants', authenticate, async (req, res) => {
     if (sun) { params.push(sun); query += ` AND sun_requirement = $${params.length}`; }
 
     query += ` ORDER BY common_name LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+    params.push(limit, offset);
 
     const plants = await db.getMany(query, params);
     res.json({ plants });
@@ -2529,7 +2605,7 @@ app.post('/api/plants', authenticate, requireAdmin, async (req, res) => {
     const plant = await db.getOne(
       `INSERT INTO plant_library (company_id, common_name, botanical_name, category, container_size, sun_requirement, water_needs, retail_price, wholesale_price, is_native, description)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [req.user.companyId, stripHtml(name), p.botanical_name || p.botanicalName || null, p.category || null, p.container_size || p.containerSize || null, p.sun_requirement || p.sunRequirement || null, p.water_needs || p.waterNeeds || null, p.retail_price || p.retailPrice || null, p.wholesale_price || p.wholesalePrice || null, p.is_native || p.isNative || false, p.description || p.notes || null]
+      [req.user.companyId, stripHtml(name), stripHtml(p.botanical_name || p.botanicalName || '') || null, stripHtml(p.category || '') || null, stripHtml(p.container_size || p.containerSize || '') || null, stripHtml(p.sun_requirement || p.sunRequirement || '') || null, stripHtml(p.water_needs || p.waterNeeds || '') || null, p.retail_price || p.retailPrice || null, p.wholesale_price || p.wholesalePrice || null, p.is_native || p.isNative || false, stripHtml(p.description || p.notes || '') || null]
     );
     res.status(201).json(plant);
   } catch (err) {
@@ -2540,6 +2616,7 @@ app.post('/api/plants', authenticate, requireAdmin, async (req, res) => {
 
 app.delete('/api/plants/all', authenticate, requireAdmin, async (req, res) => {
   try {
+    if (req.query.confirm !== 'true') return res.status(400).json({ error: 'Add ?confirm=true to confirm bulk deletion' });
     const result = await db.query(
       'DELETE FROM plant_library WHERE company_id = $1',
       [req.user.companyId]
@@ -2897,7 +2974,7 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
     });
   } catch (err) {
     console.error('[plants/import] Error:', err.message);
-    res.status(500).json({ error: `Import failed: ${err.message}` });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -3268,7 +3345,7 @@ app.get('/api/designs/:id', authenticate, async (req, res) => {
 
 app.post('/api/designs/:designId/chat', authenticate, async (req, res) => {
   try {
-    const { message } = req.body;
+    const message = stripHtml(req.body.message);
     const design = await db.getOne(
       `SELECT d.* FROM designs d JOIN projects p ON p.id = d.project_id
        WHERE d.id = $1 AND p.company_id = $2`,
@@ -3309,7 +3386,7 @@ app.post('/api/designs/:designId/chat', authenticate, async (req, res) => {
             'INSERT INTO design_plants (design_id, plant_library_id, quantity, position_x, position_y) VALUES ($1, $2, $3, $4, $5)',
             [design.id, action.plantId, action.quantity, action.x, action.y]);
         } else if (action.type === 'remove_plant') {
-          await db.query('DELETE FROM design_plants WHERE id = $1', [action.designPlantId]);
+          await db.query('DELETE FROM design_plants WHERE id = $1 AND design_id = $2', [action.designPlantId, design.id]);
         }
       }
 
@@ -3346,8 +3423,9 @@ app.put('/api/design-plants/:id/position', authenticate, async (req, res) => {
     );
     if (!owned) return res.status(404).json({ error: 'Design plant not found' });
     const plant = await db.getOne(
-      'UPDATE design_plants SET position_x = $1, position_y = $2 WHERE id = $3 RETURNING *',
-      [positionX, positionY, req.params.id]
+      `UPDATE design_plants SET position_x = $1, position_y = $2 WHERE id = $3
+       AND design_id IN (SELECT d.id FROM designs d JOIN projects p ON p.id = d.project_id WHERE p.company_id = $4) RETURNING *`,
+      [positionX, positionY, req.params.id, req.user.companyId]
     );
     res.json(plant);
   } catch (err) {
@@ -3365,6 +3443,10 @@ app.post('/api/designs/:designId/plants', authenticate, async (req, res) => {
     );
     if (!owned) return res.status(404).json({ error: 'Design not found' });
     const { plantLibraryId, quantity, positionX, positionY, containerSize } = req.body;
+    if (plantLibraryId) {
+      const plantOwned = await db.getOne('SELECT id FROM plant_library WHERE id = $1 AND company_id = $2', [plantLibraryId, req.user.companyId]);
+      if (!plantOwned) return res.status(403).json({ error: 'Plant not found or not owned by your company' });
+    }
     const plant = await db.getOne(
       `INSERT INTO design_plants (design_id, plant_library_id, quantity, position_x, position_y, container_size)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
@@ -3407,10 +3489,9 @@ app.post('/api/projects/:projectId/estimates/generate', authenticate, async (req
     const company = await db.getOne('SELECT * FROM companies WHERE id = $1', [req.user.companyId]);
     if (!company) return res.status(404).json({ error: 'Company not found' });
 
-    // Mark previous as not current
-    await db.query('UPDATE estimates SET is_current = false WHERE project_id = $1', [project.id]);
-
     const estimate = await db.transaction(async (client) => {
+      // Mark previous as not current (inside transaction to prevent race)
+      await client.query('UPDATE estimates SET is_current = false WHERE project_id = $1', [project.id]);
       const est = await client.query(
         `INSERT INTO estimates (project_id, company_id, tax_rate, tax_enabled, labor_method, material_markup, terms, warranty)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
@@ -3525,6 +3606,24 @@ app.post('/api/estimates/generate', authenticate, (req, res) => {
   res.status(400).json({ error: 'Project ID is required. Use POST /api/projects/:projectId/estimates/generate' });
 });
 
+app.get('/api/estimates', authenticate, async (req, res) => {
+  try {
+    const { status, project_id, limit = 50, offset = 0 } = req.query;
+    let query = 'SELECT e.*, p.name as project_name FROM estimates e LEFT JOIN projects p ON e.project_id = p.id WHERE e.company_id = $1';
+    const values = [req.user.companyId];
+    let idx = 2;
+    if (status) { query += ` AND e.status = $${idx}`; values.push(status); idx++; }
+    if (project_id) { query += ` AND e.project_id = $${idx}`; values.push(project_id); idx++; }
+    query += ` ORDER BY e.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`;
+    values.push(parseInt(limit), parseInt(offset));
+    const estimates = await db.getMany(query, values);
+    res.json({ estimates });
+  } catch (err) {
+    console.error('GET /api/estimates error:', err.message);
+    res.status(500).json({ error: 'Failed to list estimates' });
+  }
+});
+
 app.get('/api/estimates/:id', authenticate, async (req, res) => {
   try {
     const estimate = await db.getOne('SELECT * FROM estimates WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
@@ -3545,8 +3644,12 @@ app.put('/api/estimates/:id', authenticate, async (req, res) => {
     const allowed = ['notes', 'terms', 'warranty', 'valid_until', 'tax_rate', 'tax_enabled', 'labor_method', 'material_markup'];
     const updates = [], values = [];
     let idx = 1;
+    const stringFields = ['notes', 'terms', 'warranty', 'labor_method'];
     for (const key of allowed) {
-      if (req.body[key] !== undefined) { updates.push(`${key} = $${idx}`); values.push(req.body[key]); idx++; }
+      if (req.body[key] !== undefined) {
+        const val = stringFields.includes(key) && typeof req.body[key] === 'string' ? stripHtml(req.body[key]) : req.body[key];
+        updates.push(`${key} = $${idx}`); values.push(val); idx++;
+      }
     }
     if (updates.length === 0) return res.json({ message: 'No fields to update' });
     values.push(req.params.id, req.user.companyId);
@@ -3573,7 +3676,7 @@ app.post('/api/estimates/:id/line-items', authenticate, async (req, res) => {
     if (isNaN(price) || price < 0) return res.status(400).json({ error: 'unitPrice must be a non-negative number' });
     if (isNaN(qty) || qty <= 0) return res.status(400).json({ error: 'quantity must be greater than 0' });
     const totalPrice = Math.round(price * qty * 100) / 100;
-    const maxSort = await db.getOne('SELECT COALESCE(MAX(sort_order), -1) as max FROM estimate_line_items WHERE estimate_id = $1', [req.params.id]);
+    const maxSort = await db.getOne('SELECT COALESCE(MAX(sort_order), -1) as max FROM estimate_line_items WHERE estimate_id = $1 FOR UPDATE', [req.params.id]);
     const item = await db.getOne(
       `INSERT INTO estimate_line_items (estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order, notes)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
@@ -3683,7 +3786,7 @@ app.post('/api/projects/:projectId/submittals/generate', authenticate, async (re
       hardscape: project.hardscape_changes,
     });
 
-    await db.query('UPDATE submittals SET is_current = false WHERE project_id = $1', [project.id]);
+    await db.query('UPDATE submittals SET is_current = false WHERE project_id = $1 AND company_id = $2', [project.id, req.user.companyId]);
 
     const submittal = await db.transaction(async (client) => {
       const sub = await client.query(
@@ -3747,8 +3850,8 @@ app.put('/api/submittals/:id', authenticate, async (req, res) => {
       }
     }
     if (updates.length === 0) return res.json({ message: 'No fields to update' });
-    values.push(req.params.id);
-    const updated = await db.getOne(`UPDATE submittals SET ${updates.join(', ')} WHERE id = $${idx} RETURNING *`, values);
+    values.push(req.params.id, req.user.companyId);
+    const updated = await db.getOne(`UPDATE submittals SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = $${idx + 1} RETURNING *`, values);
     const plantProfiles = await db.getMany('SELECT * FROM submittal_plant_profiles WHERE submittal_id = $1 ORDER BY sort_order', [req.params.id]);
     res.json({ ...updated, plantProfiles });
   } catch (err) {
@@ -3833,6 +3936,8 @@ app.get('/api/team', authenticateOnly, async (req, res) => {
 app.put('/api/team/:userId', authenticateOnly, requireAdmin, async (req, res) => {
   try {
     const { role, isActive } = req.body;
+    const VALID_ROLES = ['admin', 'estimator'];
+    if (role && !VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role. Must be admin or estimator.' });
     const user = await db.getOne(
       'UPDATE users SET role = COALESCE($1, role), is_active = COALESCE($2, is_active) WHERE id = $3 AND company_id = $4 RETURNING id, email, role, is_active',
       [role, isActive, req.params.userId, req.user.companyId]
@@ -3923,7 +4028,7 @@ app.get('/api/export/plants/csv', authenticateOnly, async (req, res) => {
 // AI INTEGRATION (Direct OpenAI API via filo-ai-pipeline.js)
 // ═══════════════════════════════════════════════════════════════════
 
-const callAI = createAIHandler(db);
+const callAI = createAIHandler(db, supaStorage);
 const openaiClient = config.openai.apiKey ? new OpenAI({ apiKey: config.openai.apiKey }) : null;
 const googleAI = process.env.GOOGLE_AI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GOOGLE_AI_API_KEY }) : null;
 
@@ -3947,7 +4052,7 @@ app.get('/api/ai-jobs/:id', authenticate, async (req, res) => {
     if (!job) return res.status(404).json({ error: 'Job not found' });
     res.json(job);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -3962,7 +4067,7 @@ app.get('/api/projects/:projectId/ai-jobs', authenticate, async (req, res) => {
     );
     res.json(jobs);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -3976,7 +4081,7 @@ async function handleStripeWebhook(req, res) {
   try {
     event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], config.stripe.webhookSecret);
   } catch (err) {
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    return res.status(400).send('Webhook signature verification failed');
   }
 
   // Log webhook (non-fatal — don't crash if log insert fails)
@@ -3990,43 +4095,112 @@ async function handleStripeWebhook(req, res) {
   }
 
   try {
+    const getCompanyId = async (customerId) =>
+      (await db.getOne('SELECT id FROM companies WHERE stripe_customer_id = $1', [customerId]))?.id;
+
     switch (event.type) {
       case 'customer.subscription.created':
       case 'customer.subscription.updated': {
         const sub = event.data.object;
-        await db.query(
-          `UPDATE subscriptions SET status = $1, current_period_start = to_timestamp($2), current_period_end = to_timestamp($3),
-           cancel_at_period_end = $4, stripe_subscription_id = $5
-           WHERE company_id = (SELECT id FROM companies WHERE stripe_customer_id = $6)`,
-          [mapStripeStatus(sub.status), sub.current_period_start, sub.current_period_end, sub.cancel_at_period_end, sub.id, sub.customer]
-        );
+        const companyId = sub.metadata?.filo_company_id || await getCompanyId(sub.customer);
+        if (companyId) {
+          await db.query(
+            `UPDATE subscriptions SET status = $1, current_period_start = to_timestamp($2), current_period_end = to_timestamp($3),
+             cancel_at_period_end = $4, stripe_subscription_id = $5,
+             trial_end = $6
+             WHERE company_id = $7`,
+            [mapStripeStatus(sub.status), sub.current_period_start, sub.current_period_end,
+             sub.cancel_at_period_end, sub.id,
+             sub.trial_end ? new Date(sub.trial_end * 1000) : null,
+             companyId]
+          );
+        }
         break;
       }
       case 'customer.subscription.deleted': {
         const sub = event.data.object;
-        await db.query(
-          `UPDATE subscriptions SET status = 'canceled', canceled_at = NOW()
-           WHERE stripe_subscription_id = $1`, [sub.id]
-        );
+        const companyId = sub.metadata?.filo_company_id || await getCompanyId(sub.customer);
+        if (companyId) {
+          await db.query(
+            `UPDATE subscriptions SET status = 'canceled', canceled_at = NOW() WHERE company_id = $1`,
+            [companyId]
+          );
+          await db.query(
+            `INSERT INTO activity_log (company_id, entity_type, entity_id, action, description)
+             VALUES ($1, 'subscription', $2, 'canceled', 'Subscription canceled — account locked')`,
+            [companyId, sub.id]
+          ).catch(() => {});
+        }
+        break;
+      }
+      case 'customer.subscription.paused': {
+        const sub = event.data.object;
+        const companyId = sub.metadata?.filo_company_id || await getCompanyId(sub.customer);
+        if (companyId) {
+          await db.query("UPDATE subscriptions SET status = 'paused' WHERE company_id = $1", [companyId]);
+        }
+        break;
+      }
+      case 'customer.subscription.resumed': {
+        const sub = event.data.object;
+        const companyId = sub.metadata?.filo_company_id || await getCompanyId(sub.customer);
+        if (companyId) {
+          await db.query("UPDATE subscriptions SET status = 'active' WHERE company_id = $1", [companyId]);
+        }
+        break;
+      }
+      case 'customer.subscription.trial_will_end': {
+        const sub = event.data.object;
+        const companyId = sub.metadata?.filo_company_id || await getCompanyId(sub.customer);
+        if (companyId) {
+          await db.query(
+            `INSERT INTO activity_log (company_id, entity_type, action, description)
+             VALUES ($1, 'subscription', 'trial_ending', 'Trial ending soon. Add a payment method to continue.')`,
+            [companyId]
+          ).catch(() => {});
+        }
         break;
       }
       case 'invoice.payment_failed': {
         const invoice = event.data.object;
-        await db.query(
-          `UPDATE subscriptions SET status = 'past_due'
-           WHERE company_id = (SELECT id FROM companies WHERE stripe_customer_id = $1)`,
-          [invoice.customer]
-        );
+        const companyId = await getCompanyId(invoice.customer);
+        if (companyId) {
+          await db.query(
+            "UPDATE subscriptions SET status = 'past_due' WHERE company_id = $1",
+            [companyId]
+          );
+          await db.query(
+            `INSERT INTO activity_log (company_id, entity_type, action, description)
+             VALUES ($1, 'subscription', 'payment_failed', 'Payment failed. Update your payment method to avoid losing access.')`,
+            [companyId]
+          ).catch(() => {});
+        }
         break;
       }
       case 'invoice.paid': {
         const invoice = event.data.object;
-        await db.query(
-          `UPDATE subscriptions SET status = 'active'
-           WHERE company_id = (SELECT id FROM companies WHERE stripe_customer_id = $1)
-             AND status IN ('past_due', 'locked')`,
-          [invoice.customer]
-        );
+        const companyId = await getCompanyId(invoice.customer);
+        if (companyId) {
+          await db.query(
+            `UPDATE subscriptions SET status = 'active'
+             WHERE company_id = $1 AND status IN ('past_due', 'locked')`,
+            [companyId]
+          );
+        }
+        break;
+      }
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        const companyId = session.metadata?.filo_company_id || (session.customer ? await getCompanyId(session.customer) : null);
+        if (companyId && session.subscription) {
+          await db.query(
+            `INSERT INTO subscriptions (company_id, stripe_subscription_id, status)
+             VALUES ($1, $2, 'active')
+             ON CONFLICT (company_id) DO UPDATE SET stripe_subscription_id = $2, status = 'active'`,
+            [companyId, session.subscription]
+          );
+          await db.query('UPDATE companies SET stripe_subscription_id = $1 WHERE id = $2', [session.subscription, companyId]);
+        }
         break;
       }
     }
@@ -4034,14 +4208,14 @@ async function handleStripeWebhook(req, res) {
     await db.query('UPDATE webhook_events SET processed = true, processed_at = NOW() WHERE event_id = $1', [event.id]);
   } catch (err) {
     console.error('Webhook processing error:', err);
-    await db.query('UPDATE webhook_events SET error = $1 WHERE event_id = $2', [err.message, event.id]);
+    await db.query('UPDATE webhook_events SET error = $1 WHERE event_id = $2', [err.message, event.id]).catch(() => {});
   }
 
   res.json({ received: true });
 }
 
 function mapStripeStatus(stripeStatus) {
-  const map = { active: 'active', trialing: 'trialing', past_due: 'past_due', canceled: 'canceled', incomplete: 'past_due', unpaid: 'locked' };
+  const map = { active: 'active', trialing: 'trialing', past_due: 'past_due', canceled: 'canceled', incomplete: 'past_due', incomplete_expired: 'locked', unpaid: 'locked', paused: 'paused' };
   return map[stripeStatus] || 'active';
 }
 
@@ -4050,6 +4224,8 @@ function mapStripeStatus(stripeStatus) {
 // ═══════════════════════════════════════════════════════════════════
 
 const crmManager = new CRMManager(db);
+const stripeManager = stripe ? new StripeManager(db, { secretKey: config.stripe.secretKey, webhookSecret: config.stripe.webhookSecret }) : null;
+const pdfEngine = createPDFEngine(db, supaStorage);
 
 async function triggerCrmSync(companyId, entityType, entityId, action, data) {
   // Fire-and-forget — never crashes calling route
@@ -4080,11 +4256,16 @@ const aiRateLimit = rateLimit({
 });
 
 app.get('/api/ai/health', authenticate, (req, res) => {
-  res.json({
-    configured: !!openaiClient,
-    model: openaiClient ? config.openai.model : null,
-    status: openaiClient ? 'ready' : 'not_configured',
-  });
+  try {
+    res.json({
+      configured: !!openaiClient,
+      model: openaiClient ? config.openai.model : null,
+      status: openaiClient ? 'ready' : 'not_configured',
+    });
+  } catch (err) {
+    console.error('[ai/health] Error:', err);
+    res.status(500).json({ error: 'Failed to check AI health status' });
+  }
 });
 
 app.post('/api/ai/detect-plants', authenticate, aiRateLimit, async (req, res) => {
@@ -4092,6 +4273,7 @@ app.post('/api/ai/detect-plants', authenticate, aiRateLimit, async (req, res) =>
     if (!openaiClient) return res.status(503).json({ error: 'AI service not configured' });
     const { imageUrl, location, usdaZone } = req.body;
     if (!imageUrl) return res.status(400).json({ error: 'imageUrl is required' });
+    if (!imageUrl.startsWith('data:')) validateUrlForSSRF(imageUrl);
 
     const locationContext = location
       ? `This property is in ${location.city}, ${location.state} (USDA Zone ${usdaZone || 'unknown'}).`
@@ -4132,7 +4314,7 @@ Return ONLY valid JSON: { "plants": [...] }`,
     res.json({ success: true, plants: result.plants || [] });
   } catch (err) {
     console.error('[AI Proxy] detect-plants error:', err);
-    res.status(500).json({ success: false, error: err.message, plants: [] });
+    res.status(500).json({ success: false, error: safeErrorMessage(err), plants: [] });
   }
 });
 
@@ -4149,6 +4331,7 @@ app.post('/api/ai/generate-design', authenticate, aiRateLimit, async (req, res) 
     const userContent = [];
 
     if (photoBase64) {
+      if (!photoBase64.startsWith('data:')) validateUrlForSSRF(photoBase64);
       userContent.push({ type: 'image_url', image_url: { url: photoBase64, detail: 'high' } });
     }
 
@@ -4196,7 +4379,7 @@ Create a complete plant placement plan. Return JSON with: design_rationale, plan
     res.json({ success: true, data });
   } catch (err) {
     console.error('[AI Proxy] generate-design error:', err);
-    res.status(500).json({ success: false, data: null, error: err.message });
+    res.status(500).json({ success: false, data: null, error: safeErrorMessage(err) });
   }
 });
 
@@ -4245,7 +4428,7 @@ Interpret the command and return the action JSON.`,
       message: 'I had trouble processing that command.',
       actions: [],
       warnings: [],
-      error: err.message,
+      error: safeErrorMessage(err),
     });
   }
 });
@@ -4295,7 +4478,7 @@ Write the narrative and closing statement as JSON.`,
     });
   } catch (err) {
     console.error('[AI Proxy] narrative error:', err);
-    res.status(500).json({ success: false, text: '', closing: '', error: err.message });
+    res.status(500).json({ success: false, text: '', closing: '', error: safeErrorMessage(err) });
   }
 });
 
@@ -4306,12 +4489,34 @@ Write the narrative and closing statement as JSON.`,
 app.get('/api/billing/status', authenticateOnly, async (req, res) => {
   try {
     const sub = await db.getOne(
-      'SELECT * FROM subscriptions WHERE company_id = $1 ORDER BY created_at DESC LIMIT 1',
+      `SELECT s.*, c.name as company_name, c.stripe_customer_id
+       FROM subscriptions s JOIN companies c ON c.id = s.company_id
+       WHERE s.company_id = $1 ORDER BY s.created_at DESC LIMIT 1`,
       [req.user.companyId]
     );
-    res.json({ subscription: sub || null });
+    if (!sub) return res.json({ subscription: null, status: 'none', isLocked: false, canAccess: true });
+
+    const isLocked = ['canceled', 'locked'].includes(sub.status);
+    const isTrialing = sub.status === 'trialing';
+    const trialExpired = isTrialing && sub.trial_end && new Date(sub.trial_end) < new Date();
+
+    res.json({
+      subscription: sub,
+      status: trialExpired ? 'trial_expired' : sub.status,
+      isLocked: isLocked || trialExpired,
+      canAccess: !isLocked && !trialExpired,
+      isPastDue: sub.status === 'past_due',
+      isTrialing: isTrialing && !trialExpired,
+      currentPeriodEnd: sub.current_period_end,
+      trialEnd: sub.trial_end,
+      cancelAtPeriodEnd: sub.cancel_at_period_end,
+      baseAmount: parseFloat(sub.base_amount) || 0,
+      additionalUsers: sub.additional_users || 0,
+      includedUsers: sub.included_users || 0,
+      monthlyTotal: (parseFloat(sub.base_amount) || 0) + ((sub.additional_users || 0) * (parseFloat(sub.additional_user_amount) || 0)),
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -4342,32 +4547,50 @@ app.post('/api/billing/subscribe', authenticateOnly, requireAdmin, async (req, r
       });
     }
 
-    const priceId = config.stripe.basePriceId;
-    if (!priceId) return res.status(503).json({ error: 'Stripe price not configured' });
+    const basePriceId = config.stripe.basePriceId;
+    if (!basePriceId) return res.status(503).json({ error: 'Stripe price not configured' });
+
+    // Build subscription items: base plan + additional users beyond included 3
+    const items = [{ price: basePriceId, quantity: 1 }];
+    const userPriceId = config.stripe.userPriceId;
+    if (userPriceId) {
+      const userCount = await db.getOne(
+        'SELECT COUNT(*) FROM users WHERE company_id = $1 AND is_active = true',
+        [company.id]
+      );
+      const additionalUsers = Math.max(0, parseInt(userCount.count) - 3);
+      if (additionalUsers > 0) {
+        items.push({ price: userPriceId, quantity: additionalUsers });
+      }
+    }
 
     const subscription = await stripe.subscriptions.create({
       customer: customerId,
-      items: [{ price: priceId }],
+      items,
+      trial_period_days: 14,
       payment_behavior: 'default_incomplete',
+      payment_settings: { save_default_payment_method: 'on_subscription' },
       expand: ['latest_invoice.payment_intent'],
+      metadata: { filo_company_id: company.id },
     });
 
     await db.query(
-      `INSERT INTO subscriptions (company_id, stripe_subscription_id, status, current_period_start, current_period_end)
-       VALUES ($1, $2, $3, to_timestamp($4), to_timestamp($5))
+      `INSERT INTO subscriptions (company_id, stripe_subscription_id, stripe_customer_id, status, plan_name, current_period_start, current_period_end)
+       VALUES ($1, $2, $3, $4, $5, to_timestamp($6), to_timestamp($7))
        ON CONFLICT (company_id) DO UPDATE SET
          stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+         stripe_customer_id = EXCLUDED.stripe_customer_id,
          status = EXCLUDED.status,
          current_period_start = EXCLUDED.current_period_start,
          current_period_end = EXCLUDED.current_period_end`,
-      [company.id, subscription.id, subscription.status,
+      [company.id, subscription.id, customerId, subscription.status, 'base',
        subscription.current_period_start, subscription.current_period_end]
     );
 
     res.json({ subscriptionId: subscription.id, status: subscription.status, clientSecret: subscription.latest_invoice?.payment_intent?.client_secret });
   } catch (err) {
     console.error('[billing/subscribe] Error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -4380,12 +4603,12 @@ app.post('/api/billing/portal', authenticateOnly, requireAdmin, async (req, res)
 
     const session = await stripe.billingPortal.sessions.create({
       customer: company.stripe_customer_id,
-      return_url: returnUrl || process.env.APP_URL || 'https://app.myfilocrm.com',
+      return_url: returnUrl || process.env.FRONTEND_URL || process.env.APP_URL || 'https://app.myfilocrm.com',
     });
     res.json({ url: session.url });
   } catch (err) {
     console.error('[billing/portal] Error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -4414,7 +4637,7 @@ app.post('/api/billing/cancel', authenticateOnly, requireAdmin, async (req, res)
     res.json({ status: updated.status, cancelAtPeriodEnd: updated.cancel_at_period_end });
   } catch (err) {
     console.error('[billing/cancel] Error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -4428,7 +4651,240 @@ app.get('/api/billing/invoices', authenticateOnly, async (req, res) => {
     res.json({ invoices: invoices.data });
   } catch (err) {
     console.error('[billing/invoices] Error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+// ─── Checkout Session (Stripe-hosted payment page) ───────────────
+
+app.post('/api/billing/checkout', authenticateOnly, requireAdmin, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const { successUrl, cancelUrl } = req.body;
+    const company = await db.getOne('SELECT * FROM companies WHERE id = $1', [req.user.companyId]);
+    const adminUser = await db.getOne('SELECT email FROM users WHERE id = $1', [req.user.userId]);
+
+    let customerId = company.stripe_customer_id;
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: adminUser?.email || company.email,
+        name: company.name,
+        metadata: { filo_company_id: company.id },
+      });
+      customerId = customer.id;
+      await db.query('UPDATE companies SET stripe_customer_id = $1 WHERE id = $2', [customerId, company.id]);
+    }
+
+    const priceId = config.stripe.basePriceId;
+    if (!priceId) return res.status(503).json({ error: 'Stripe price not configured' });
+
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      mode: 'subscription',
+      line_items: [{ price: priceId, quantity: 1 }],
+      subscription_data: {
+        trial_period_days: 14,
+        metadata: { filo_company_id: company.id },
+      },
+      success_url: successUrl || `${process.env.FRONTEND_URL || process.env.APP_URL || 'https://app.myfilocrm.com'}?billing=success`,
+      cancel_url: cancelUrl || `${process.env.FRONTEND_URL || process.env.APP_URL || 'https://app.myfilocrm.com'}?billing=cancel`,
+    });
+
+    res.json({ sessionId: session.id, url: session.url });
+  } catch (err) {
+    console.error('[billing/checkout] Error:', err);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+// ─── Reactivate (undo cancel-at-period-end) ──────────────────────
+
+app.post('/api/billing/reactivate', authenticateOnly, requireAdmin, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const sub = await db.getOne(
+      "SELECT * FROM subscriptions WHERE company_id = $1 AND status NOT IN ('canceled', 'locked') ORDER BY created_at DESC LIMIT 1",
+      [req.user.companyId]
+    );
+    if (!sub?.stripe_subscription_id) return res.status(400).json({ error: 'No subscription to reactivate' });
+
+    await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: false });
+    await db.query(
+      "UPDATE subscriptions SET cancel_at_period_end = false, canceled_at = NULL, status = 'active' WHERE id = $1",
+      [sub.id]
+    );
+    res.json({ status: 'active', message: 'Subscription reactivated' });
+  } catch (err) {
+    console.error('[billing/reactivate] Error:', err);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+// ─── Pause / Resume ──────────────────────────────────────────────
+
+app.post('/api/billing/pause', authenticateOnly, requireAdmin, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const sub = await db.getOne(
+      "SELECT * FROM subscriptions WHERE company_id = $1 AND status IN ('active') ORDER BY created_at DESC LIMIT 1",
+      [req.user.companyId]
+    );
+    if (!sub?.stripe_subscription_id) return res.status(400).json({ error: 'No active subscription' });
+
+    await stripe.subscriptions.update(sub.stripe_subscription_id, {
+      pause_collection: { behavior: 'mark_uncollectible' },
+    });
+    await db.query("UPDATE subscriptions SET status = 'paused' WHERE id = $1", [sub.id]);
+    res.json({ status: 'paused' });
+  } catch (err) {
+    console.error('[billing/pause] Error:', err);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+app.post('/api/billing/resume', authenticateOnly, requireAdmin, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const sub = await db.getOne(
+      "SELECT * FROM subscriptions WHERE company_id = $1 AND status = 'paused' ORDER BY created_at DESC LIMIT 1",
+      [req.user.companyId]
+    );
+    if (!sub?.stripe_subscription_id) return res.status(400).json({ error: 'No paused subscription' });
+
+    await stripe.subscriptions.update(sub.stripe_subscription_id, { pause_collection: null });
+    await db.query("UPDATE subscriptions SET status = 'active' WHERE id = $1", [sub.id]);
+    res.json({ status: 'active' });
+  } catch (err) {
+    console.error('[billing/resume] Error:', err);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+// ─── Add / Remove User (Stripe proration) ────────────────────────
+
+app.post('/api/billing/add-user', authenticateOnly, requireAdmin, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const sub = await db.getOne(
+      "SELECT * FROM subscriptions WHERE company_id = $1 AND status IN ('active', 'trialing') ORDER BY created_at DESC LIMIT 1",
+      [req.user.companyId]
+    );
+    if (!sub?.stripe_subscription_id) return res.status(400).json({ error: 'No active subscription' });
+
+    const subscription = await stripe.subscriptions.retrieve(sub.stripe_subscription_id);
+    const userPriceId = config.stripe.userPriceId;
+    if (!userPriceId) return res.status(503).json({ error: 'User price not configured' });
+
+    const userItem = subscription.items.data.find(i => i.price.id === userPriceId);
+
+    if (userItem) {
+      await stripe.subscriptionItems.update(userItem.id, {
+        quantity: userItem.quantity + 1,
+        proration_behavior: 'create_prorations',
+      });
+    } else {
+      await stripe.subscriptionItems.create({
+        subscription: subscription.id,
+        price: userPriceId,
+        quantity: 1,
+        proration_behavior: 'create_prorations',
+      });
+    }
+
+    await db.query(
+      'UPDATE subscriptions SET additional_users = additional_users + 1 WHERE id = $1',
+      [sub.id]
+    );
+    res.json({ success: true, message: 'User added. Prorated charge applied.' });
+  } catch (err) {
+    console.error('[billing/add-user] Error:', err);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+app.post('/api/billing/remove-user', authenticateOnly, requireAdmin, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const sub = await db.getOne(
+      "SELECT * FROM subscriptions WHERE company_id = $1 AND status IN ('active', 'trialing') ORDER BY created_at DESC LIMIT 1",
+      [req.user.companyId]
+    );
+    if (!sub?.stripe_subscription_id) return res.status(400).json({ error: 'No active subscription' });
+
+    const subscription = await stripe.subscriptions.retrieve(sub.stripe_subscription_id);
+    const userPriceId = config.stripe.userPriceId;
+    if (!userPriceId) return res.status(503).json({ error: 'User price not configured' });
+
+    const userItem = subscription.items.data.find(i => i.price.id === userPriceId);
+
+    if (userItem && userItem.quantity > 1) {
+      await stripe.subscriptionItems.update(userItem.id, {
+        quantity: userItem.quantity - 1,
+        proration_behavior: 'create_prorations',
+      });
+    } else if (userItem && userItem.quantity === 1) {
+      await stripe.subscriptionItems.del(userItem.id, { proration_behavior: 'create_prorations' });
+    } else {
+      return res.status(400).json({ error: 'No additional users to remove' });
+    }
+
+    await db.query(
+      'UPDATE subscriptions SET additional_users = GREATEST(0, additional_users - 1) WHERE id = $1',
+      [sub.id]
+    );
+    res.json({ success: true, message: 'User removed. Prorated credit applied.' });
+  } catch (err) {
+    console.error('[billing/remove-user] Error:', err);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+// ─── Upcoming Invoice ────────────────────────────────────────────
+
+app.get('/api/billing/upcoming', authenticateOnly, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const company = await db.getOne('SELECT stripe_customer_id FROM companies WHERE id = $1', [req.user.companyId]);
+    if (!company?.stripe_customer_id) return res.json({ upcoming: null });
+
+    const invoice = await stripe.invoices.retrieveUpcoming({ customer: company.stripe_customer_id });
+    res.json({
+      upcoming: {
+        amount: invoice.amount_due / 100,
+        date: invoice.next_payment_attempt ? new Date(invoice.next_payment_attempt * 1000) : null,
+        lines: invoice.lines.data.map(l => ({
+          description: l.description,
+          amount: l.amount / 100,
+          quantity: l.quantity,
+        })),
+      },
+    });
+  } catch (err) {
+    if (err.code === 'invoice_upcoming_none') return res.json({ upcoming: null });
+    console.error('[billing/upcoming] Error:', err);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+// ─── Update Payment Method ───────────────────────────────────────
+
+app.put('/api/billing/payment-method', authenticateOnly, requireAdmin, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
+  try {
+    const { paymentMethodId } = req.body;
+    if (!paymentMethodId) return res.status(400).json({ error: 'paymentMethodId is required' });
+
+    const company = await db.getOne('SELECT stripe_customer_id FROM companies WHERE id = $1', [req.user.companyId]);
+    if (!company?.stripe_customer_id) return res.status(400).json({ error: 'No billing account found' });
+
+    await stripe.paymentMethods.attach(paymentMethodId, { customer: company.stripe_customer_id });
+    await stripe.customers.update(company.stripe_customer_id, {
+      invoice_settings: { default_payment_method: paymentMethodId },
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[billing/payment-method] Error:', err);
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -4439,15 +4895,93 @@ app.get('/api/billing/invoices', authenticateOnly, async (req, res) => {
 mountCRMRoutes(app, crmManager, authenticate, requireAdmin);
 
 // ═══════════════════════════════════════════════════════════════════
-// PDF ROUTES (stubs — filo-pdf-engine.js not yet mounted)
+// STRIPE ROUTES (mounted from filo-stripe-module.js)
+// ═══════════════════════════════════════════════════════════════════
+
+// Stripe billing routes are defined inline above (they use authenticateOnly
+// to allow users with lapsed subscriptions to manage billing).
+// Do NOT mount filo-stripe-module routes — they duplicate every endpoint.
+
+// ═══════════════════════════════════════════════════════════════════
+// PDF ROUTES
 // ═══════════════════════════════════════════════════════════════════
 
 app.post('/api/estimates/:id/pdf', authenticate, async (req, res) => {
-  res.status(501).json({ error: 'PDF generation not yet implemented. Export via /projects/:id/export instead.' });
+  try {
+    const est = await db.getOne('SELECT * FROM estimates WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
+    if (!est) return res.status(404).json({ error: 'Estimate not found' });
+    const proj = await db.getOne(`SELECT p.*, c.display_name as client_name, c.address_line1, c.city, c.state, c.zip FROM projects p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = $1`, [est.project_id]);
+    const co = await db.getOne('SELECT * FROM companies WHERE id = $1', [req.user.companyId]);
+    const items = await db.getMany('SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [req.params.id]);
+    const PDFDocument = (await import('pdfkit')).default;
+    const doc = new PDFDocument({ size: 'letter', margins: { top: 50, bottom: 60, left: 55, right: 55 }, info: { Title: `Estimate - ${proj?.client_name || 'Client'}`, Author: co?.name || 'FILO' }});
+    const chunks = []; doc.on('data', ch => chunks.push(ch));
+    const pdfReady = new Promise((ok, fail) => { doc.on('end', () => ok(Buffer.concat(chunks))); doc.on('error', fail); });
+    doc.fontSize(22).font('Helvetica-Bold').text(co?.name || 'Landscape Company', 55, 50);
+    if (co?.phone || co?.email) { doc.fontSize(10).font('Helvetica').fillColor([100,100,100]); doc.text([co.phone, co.email, co.website].filter(Boolean).join(' | ')); }
+    doc.moveDown(0.5); doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor([200,200,200]).lineWidth(1).stroke(); doc.moveDown(0.8);
+    doc.fontSize(18).font('Helvetica-Bold').fillColor([30,30,30]).text('Estimate'); doc.moveDown(0.3);
+    doc.fontSize(11).font('Helvetica').fillColor([60,60,60]);
+    if (proj?.client_name) doc.text(`Client: ${proj.client_name}`);
+    if (proj?.address_line1) doc.text(`Address: ${[proj.address_line1, proj.city, proj.state, proj.zip].filter(Boolean).join(', ')}`);
+    doc.text(`Date: ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`); doc.moveDown(1);
+    const hY = doc.y; doc.fontSize(10).font('Helvetica-Bold').fillColor([80,80,80]);
+    doc.text('Description', 55, hY, { width: 280 }); doc.text('Qty', 340, hY, { width: 50, align: 'right' });
+    doc.text('Unit Price', 400, hY, { width: 70, align: 'right' }); doc.text('Total', 480, hY, { width: 77, align: 'right' });
+    doc.y = hY + 14; doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor([200,200,200]).lineWidth(0.5).stroke(); doc.moveDown(0.4);
+    for (const li of items) { if (doc.y > 680) { doc.addPage(); doc.y = 50; } const rY = doc.y; doc.fontSize(10).font('Helvetica').fillColor([40,40,40]); doc.text(li.description || li.category, 55, rY, { width: 280 }); doc.text(String(parseFloat(li.quantity)), 340, rY, { width: 50, align: 'right' }); doc.text(`$${parseFloat(li.unit_price).toFixed(2)}`, 400, rY, { width: 70, align: 'right' }); doc.text(`$${parseFloat(li.total_price).toFixed(2)}`, 480, rY, { width: 77, align: 'right' }); doc.y = rY + 16; doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor([235,235,235]).lineWidth(0.3).stroke(); doc.moveDown(0.3); }
+    doc.moveDown(0.5); doc.moveTo(400, doc.y).lineTo(557, doc.y).strokeColor([180,180,180]).lineWidth(1).stroke(); doc.moveDown(0.4);
+    let tY = doc.y; doc.fontSize(11).font('Helvetica').fillColor([60,60,60]);
+    doc.text('Subtotal:', 400, tY, { width: 77 }); doc.text(`$${parseFloat(est.subtotal || 0).toFixed(2)}`, 480, tY, { width: 77, align: 'right' }); tY += 16;
+    if (est.tax_enabled && parseFloat(est.tax_amount) > 0) { doc.text(`Tax (${(parseFloat(est.tax_rate || 0) * 100).toFixed(2)}%):`, 400, tY, { width: 77 }); doc.text(`$${parseFloat(est.tax_amount).toFixed(2)}`, 480, tY, { width: 77, align: 'right' }); tY += 20; }
+    doc.fontSize(14).font('Helvetica-Bold').fillColor([30,30,30]); doc.text('Total:', 400, tY, { width: 77 }); doc.text(`$${parseFloat(est.total || 0).toFixed(2)}`, 480, tY, { width: 77, align: 'right' });
+    if (est.terms) { doc.y = tY + 30; doc.fontSize(10).font('Helvetica-Bold').fillColor([80,80,80]).text('Terms & Conditions'); doc.moveDown(0.3); doc.fontSize(9).font('Helvetica').fillColor([100,100,100]).text(est.terms, { width: 502, lineGap: 2 }); }
+    doc.end(); const pdfBuf = await pdfReady;
+    const sKey = `${req.user.companyId}/estimate_pdf/${req.params.id}.pdf`;
+    await supaStorage.upload(sKey, pdfBuf, 'application/pdf');
+    const pdfUrl = supaStorage.getPublicUrl(sKey);
+    await db.query('UPDATE estimates SET pdf_url = $1 WHERE id = $2', [pdfUrl, req.params.id]);
+    res.json({ success: true, pdfUrl });
+  } catch (err) { console.error('[estimates/pdf] Error:', err.message); res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
 app.post('/api/estimates/:id/pdf/all', authenticate, async (req, res) => {
-  res.status(501).json({ error: 'PDF generation not yet implemented. Export via /projects/:id/export instead.' });
+  try {
+    const est = await db.getOne('SELECT * FROM estimates WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
+    if (!est) return res.status(404).json({ error: 'Estimate not found' });
+    const proj = await db.getOne(`SELECT p.*, c.display_name as client_name, c.address_line1, c.city, c.state, c.zip FROM projects p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = $1`, [est.project_id]);
+    const co = await db.getOne('SELECT * FROM companies WHERE id = $1', [req.user.companyId]);
+    const items = await db.getMany('SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [req.params.id]);
+    const PDFDocument = (await import('pdfkit')).default;
+    const doc = new PDFDocument({ size: 'letter', margins: { top: 50, bottom: 60, left: 55, right: 55 }, info: { Title: `Estimate - ${proj?.client_name || 'Client'}`, Author: co?.name || 'FILO' }});
+    const chunks = []; doc.on('data', ch => chunks.push(ch));
+    const pdfReady = new Promise((ok, fail) => { doc.on('end', () => ok(Buffer.concat(chunks))); doc.on('error', fail); });
+    doc.fontSize(22).font('Helvetica-Bold').text(co?.name || 'Landscape Company', 55, 50);
+    if (co?.phone || co?.email) { doc.fontSize(10).font('Helvetica').fillColor([100,100,100]); doc.text([co.phone, co.email, co.website].filter(Boolean).join(' | ')); }
+    doc.moveDown(0.5); doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor([200,200,200]).lineWidth(1).stroke(); doc.moveDown(0.8);
+    doc.fontSize(18).font('Helvetica-Bold').fillColor([30,30,30]).text('Estimate'); doc.moveDown(0.3);
+    doc.fontSize(11).font('Helvetica').fillColor([60,60,60]);
+    if (proj?.client_name) doc.text(`Client: ${proj.client_name}`);
+    if (proj?.address_line1) doc.text(`Address: ${[proj.address_line1, proj.city, proj.state, proj.zip].filter(Boolean).join(', ')}`);
+    doc.text(`Date: ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`); doc.moveDown(1);
+    const hY = doc.y; doc.fontSize(10).font('Helvetica-Bold').fillColor([80,80,80]);
+    doc.text('Description', 55, hY, { width: 280 }); doc.text('Qty', 340, hY, { width: 50, align: 'right' });
+    doc.text('Unit Price', 400, hY, { width: 70, align: 'right' }); doc.text('Total', 480, hY, { width: 77, align: 'right' });
+    doc.y = hY + 14; doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor([200,200,200]).lineWidth(0.5).stroke(); doc.moveDown(0.4);
+    for (const li of items) { if (doc.y > 680) { doc.addPage(); doc.y = 50; } const rY = doc.y; doc.fontSize(10).font('Helvetica').fillColor([40,40,40]); doc.text(li.description || li.category, 55, rY, { width: 280 }); doc.text(String(parseFloat(li.quantity)), 340, rY, { width: 50, align: 'right' }); doc.text(`$${parseFloat(li.unit_price).toFixed(2)}`, 400, rY, { width: 70, align: 'right' }); doc.text(`$${parseFloat(li.total_price).toFixed(2)}`, 480, rY, { width: 77, align: 'right' }); doc.y = rY + 16; doc.moveTo(55, doc.y).lineTo(557, doc.y).strokeColor([235,235,235]).lineWidth(0.3).stroke(); doc.moveDown(0.3); }
+    doc.moveDown(0.5); doc.moveTo(400, doc.y).lineTo(557, doc.y).strokeColor([180,180,180]).lineWidth(1).stroke(); doc.moveDown(0.4);
+    let tY = doc.y; doc.fontSize(11).font('Helvetica').fillColor([60,60,60]);
+    doc.text('Subtotal:', 400, tY, { width: 77 }); doc.text(`$${parseFloat(est.subtotal || 0).toFixed(2)}`, 480, tY, { width: 77, align: 'right' }); tY += 16;
+    if (est.tax_enabled && parseFloat(est.tax_amount) > 0) { doc.text(`Tax (${(parseFloat(est.tax_rate || 0) * 100).toFixed(2)}%):`, 400, tY, { width: 77 }); doc.text(`$${parseFloat(est.tax_amount).toFixed(2)}`, 480, tY, { width: 77, align: 'right' }); tY += 20; }
+    doc.fontSize(14).font('Helvetica-Bold').fillColor([30,30,30]); doc.text('Total:', 400, tY, { width: 77 }); doc.text(`$${parseFloat(est.total || 0).toFixed(2)}`, 480, tY, { width: 77, align: 'right' });
+    if (est.terms) { doc.y = tY + 30; doc.fontSize(10).font('Helvetica-Bold').fillColor([80,80,80]).text('Terms & Conditions'); doc.moveDown(0.3); doc.fontSize(9).font('Helvetica').fillColor([100,100,100]).text(est.terms, { width: 502, lineGap: 2 }); }
+    doc.end(); const pdfBuf = await pdfReady;
+    const sKey = `${req.user.companyId}/estimate_pdf/${req.params.id}.pdf`;
+    await supaStorage.upload(sKey, pdfBuf, 'application/pdf');
+    const pdfUrl = supaStorage.getPublicUrl(sKey);
+    await db.query('UPDATE estimates SET pdf_url = $1 WHERE id = $2', [pdfUrl, req.params.id]);
+    res.json({ success: true, pdfUrl });
+  } catch (err) { console.error('[estimates/pdf] Error:', err.message); res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
 app.post('/api/submittals/:id/pdf', authenticate, async (req, res) => {
@@ -4475,7 +5009,7 @@ app.post('/api/submittals/:id/pdf', authenticate, async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('[submittals/pdf] Error:', err.message);
-    res.status(500).json({ error: `PDF generation failed: ${err.message}` });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -4494,7 +5028,7 @@ app.get('/api/files/:fileId/download', authenticate, async (req, res) => {
     if (!file) return res.status(404).json({ error: 'File not found' });
     res.json({ url: file.cdn_url, name: file.original_name });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: safeErrorMessage(err) });
   }
 });
 
@@ -4509,7 +5043,7 @@ app.get('/api/health', async (req, res) => {
     ]);
     health.services.database = await dbCheck;
   } catch (err) {
-    health.services.database = `unavailable: ${err.message}`;
+    health.services.database = 'unavailable';
   }
   health.services.openai = openaiClient ? 'configured' : 'not configured';
   health.services.stripe = stripe ? 'configured' : 'not configured';
@@ -4536,7 +5070,7 @@ app.use((err, req, res, next) => {
   // Default
   console.error('Unhandled error:', err.status, err.type, err.message);
   const statusCode = (err.status && typeof err.status === 'number' && err.status >= 400 && err.status < 500) ? err.status : 500;
-  res.status(statusCode).json({ error: statusCode < 500 ? err.message : 'Internal server error' });
+  res.status(statusCode).json({ error: 'Internal server error' });
 });
 
 // ─── Startup Environment Checks ──────────────────────────────────
@@ -4550,9 +5084,12 @@ if (MISSING_ENV.length > 0) {
     process.exit(1);
   }
 }
-if (!config.jwtSecret || !config.jwtRefreshSecret) {
-  console.error('FATAL: JWT_SECRET and JWT_REFRESH_SECRET must be set. Server cannot start safely.');
-  process.exit(1);
+if (!process.env.JWT_SECRET || !process.env.JWT_REFRESH_SECRET) {
+  if (config.nodeEnv === 'production') {
+    console.error('FATAL: JWT_SECRET and JWT_REFRESH_SECRET must be set in production. Server cannot start safely.');
+    process.exit(1);
+  }
+  console.warn('WARNING: Using insecure dev-only JWT fallback secrets. Set JWT_SECRET and JWT_REFRESH_SECRET for production.');
 }
 
 const OPTIONAL_ENV = [
@@ -4561,6 +5098,9 @@ const OPTIONAL_ENV = [
   ['STRIPE_BASE_PRICE_ID', 'Stripe base subscription price — billing endpoints will error without it'],
   ['STRIPE_USER_PRICE_ID', 'Stripe per-user price — billing endpoints will error without it'],
   ['GPT_MODEL', 'OpenAI model override — defaults to gpt-4o'],
+  ['GOOGLE_AI_API_KEY', 'Google Gemini API key — plant detection and analysis routes will return 503'],
+  ['FRONTEND_URL', 'Frontend URL for CORS and invite links — defaults to http://localhost:3000'],
+  ['APP_URL', 'Application URL for Stripe redirects — defaults to https://app.myfilocrm.com'],
 ];
 for (const [key, note] of OPTIONAL_ENV) {
   if (!process.env[key]) console.warn(`ℹ️  Optional env not set: ${key} — ${note}`);
@@ -4593,11 +5133,18 @@ app.listen(config.port, async () => {
     console.log('   design_style column converted to VARCHAR(50)');
   } catch (e) {
     // If it's already VARCHAR or the ALTER fails, try adding missing enum values
-    const newStyles = ['mediterranean', 'cottage', 'desert', 'farmhouse', 'transitional'];
-    for (const style of newStyles) {
+    // NOTE: ALTER TYPE ADD VALUE does not support parameterized queries in PostgreSQL.
+    // Whitelist-validated: only exact matches from this static map are executed.
+    const STYLE_DDL = {
+      'mediterranean': "ALTER TYPE design_style_enum ADD VALUE IF NOT EXISTS 'mediterranean'",
+      'cottage':       "ALTER TYPE design_style_enum ADD VALUE IF NOT EXISTS 'cottage'",
+      'desert':        "ALTER TYPE design_style_enum ADD VALUE IF NOT EXISTS 'desert'",
+      'farmhouse':     "ALTER TYPE design_style_enum ADD VALUE IF NOT EXISTS 'farmhouse'",
+      'transitional':  "ALTER TYPE design_style_enum ADD VALUE IF NOT EXISTS 'transitional'",
+    };
+    for (const sql of Object.values(STYLE_DDL)) {
       try {
-        const safeStyle = style.replace(/[^a-z_]/g, '');
-        await db.query(`ALTER TYPE design_style_enum ADD VALUE IF NOT EXISTS '${safeStyle}'`);
+        await db.query(sql);
       } catch (enumErr) {
         // enum value already exists or type doesn't exist — that's fine
       }
@@ -4618,6 +5165,15 @@ app.listen(config.port, async () => {
     console.log('   saved_prompts table ready');
   } catch (e) {
     console.warn('   saved_prompts table check failed:', e.message);
+  }
+
+  // Ensure password reset columns exist on users table
+  try {
+    await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_token UUID');
+    await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_sent_at TIMESTAMPTZ');
+    console.log('   users recovery columns ready');
+  } catch (e) {
+    console.warn('   users recovery columns check failed:', e.message);
   }
 
   // Ensure plant_library table exists with all required columns
@@ -4648,22 +5204,18 @@ app.listen(config.port, async () => {
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     )`);
-    // Add any missing columns (safe — IF NOT EXISTS)
-    const cols = [
-      ['is_available', 'BOOLEAN DEFAULT true'],
-      ['sort_order', 'INTEGER DEFAULT 0'],
-      ['wholesale_price', 'NUMERIC(10,2)'],
-      ['retail_price', 'NUMERIC(10,2)'],
-      ['is_native', 'BOOLEAN DEFAULT false'],
-      ['container_size', 'VARCHAR(100)'],
-      ['description', 'TEXT'],
+    // Add any missing columns — each DDL is a static string (no interpolation)
+    const PLANT_LIBRARY_COL_DDL = [
+      'ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS is_available BOOLEAN DEFAULT true',
+      'ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0',
+      'ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS wholesale_price NUMERIC(10,2)',
+      'ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS retail_price NUMERIC(10,2)',
+      'ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS is_native BOOLEAN DEFAULT false',
+      'ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS container_size VARCHAR(100)',
+      'ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS description TEXT',
     ];
-    for (const [col, type] of cols) {
-      try {
-        const safeName = col.replace(/[^a-z_]/g, '');
-        const safeType = type.replace(/[^A-Za-z0-9() ,]/g, '');
-        await db.query(`ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS ${safeName} ${safeType}`);
-      } catch (e) { /* column exists */ }
+    for (const sql of PLANT_LIBRARY_COL_DDL) {
+      try { await db.query(sql); } catch (e) { /* column exists */ }
     }
     // Partial unique index for deduplication on import (only when container_size is set)
     try { await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_plant_library_dedup ON plant_library (company_id, common_name, container_size) WHERE container_size IS NOT NULL`); } catch (e) { /* index exists or conflict */ }
@@ -4674,20 +5226,17 @@ app.listen(config.port, async () => {
 
   // Ensure company submittal branding columns exist
   try {
-    const companyCols = [
-      ['tagline', 'VARCHAR(255)'],
-      ['credentials', 'TEXT'],
-      ['submittal_primary_color', "VARCHAR(7) DEFAULT '#1a3a2a'"],
-      ['submittal_accent_color', "VARCHAR(7) DEFAULT '#2d6a4f'"],
-      ['logo_url', 'TEXT'],
-      ['website', 'VARCHAR(255)'],
+    // Each DDL is a static string — no interpolation
+    const COMPANY_COL_DDL = [
+      "ALTER TABLE companies ADD COLUMN IF NOT EXISTS tagline VARCHAR(255)",
+      "ALTER TABLE companies ADD COLUMN IF NOT EXISTS credentials TEXT",
+      "ALTER TABLE companies ADD COLUMN IF NOT EXISTS submittal_primary_color VARCHAR(7) DEFAULT '#1a3a2a'",
+      "ALTER TABLE companies ADD COLUMN IF NOT EXISTS submittal_accent_color VARCHAR(7) DEFAULT '#2d6a4f'",
+      "ALTER TABLE companies ADD COLUMN IF NOT EXISTS logo_url TEXT",
+      "ALTER TABLE companies ADD COLUMN IF NOT EXISTS website VARCHAR(255)",
     ];
-    for (const [col, type] of companyCols) {
-      try {
-        const safeName = col.replace(/[^a-z_]/g, '');
-        const safeType = type.replace(/[^A-Za-z0-9() ,]/g, '');
-        await db.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS ${safeName} ${safeType}`);
-      } catch (e) { /* exists */ }
+    for (const sql of COMPANY_COL_DDL) {
+      try { await db.query(sql); } catch (e) { /* exists */ }
     }
     console.log('   company submittal columns ready');
   } catch (e) {
@@ -4714,19 +5263,16 @@ app.listen(config.port, async () => {
       poetic_desc TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )`);
-    const ppCols = [
-      ['container_size', 'VARCHAR(100)'],
-      ['quantity', 'INTEGER DEFAULT 1'],
-      ['description', 'TEXT'],
-      ['common_name', 'VARCHAR(255)'],
-      ['botanical_name', 'VARCHAR(255)'],
+    // Each DDL is a static string — no interpolation
+    const SUBMITTAL_PROFILE_COL_DDL = [
+      'ALTER TABLE submittal_plant_profiles ADD COLUMN IF NOT EXISTS container_size VARCHAR(100)',
+      'ALTER TABLE submittal_plant_profiles ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1',
+      'ALTER TABLE submittal_plant_profiles ADD COLUMN IF NOT EXISTS description TEXT',
+      'ALTER TABLE submittal_plant_profiles ADD COLUMN IF NOT EXISTS common_name VARCHAR(255)',
+      'ALTER TABLE submittal_plant_profiles ADD COLUMN IF NOT EXISTS botanical_name VARCHAR(255)',
     ];
-    for (const [col, type] of ppCols) {
-      try {
-        const safeName = col.replace(/[^a-z_]/g, '');
-        const safeType = type.replace(/[^A-Za-z0-9() ,]/g, '');
-        await db.query(`ALTER TABLE submittal_plant_profiles ADD COLUMN IF NOT EXISTS ${safeName} ${safeType}`);
-      } catch (e) { /* exists */ }
+    for (const sql of SUBMITTAL_PROFILE_COL_DDL) {
+      try { await db.query(sql); } catch (e) { /* exists */ }
     }
     console.log('   submittal_plant_profiles table ready');
   } catch (e) {
