@@ -22,6 +22,7 @@ import sharp from 'sharp';
 import OpenAI from 'openai';
 import { GoogleGenAI } from '@google/genai';
 import { createAIHandler } from './filo-ai-pipeline.js';
+import CRMManager, { mountCRMRoutes } from './filo-crm-framework.js';
 
 // ─── Configuration ───────────────────────────────────────────────
 
@@ -920,24 +921,89 @@ app.delete('/api/clients/:id', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-// ── Client Import (file upload → GPT-4o parse → bulk insert) ──
+// ─── CSV-to-Client Column Mapper ───────────────────────────────
+function mapCSVToClient(row, headers) {
+  const find = (...candidates) => {
+    for (const c of candidates) {
+      const exact = headers.find(h => h === c);
+      if (exact && row[exact]) return row[exact];
+    }
+    for (const c of candidates) {
+      const partial = headers.find(h => h.includes(c));
+      if (partial && row[partial]) return row[partial];
+    }
+    return null;
+  };
+
+  const firstName = find('first_name', 'firstname', 'first') || null;
+  const lastName = find('last_name', 'lastname', 'last') || null;
+  const companyName = find('company_name', 'company', 'business', 'organization') || null;
+  const email = find('email', 'e_mail', 'email_address') || null;
+  const phone = find('phone', 'telephone', 'mobile', 'cell', 'phone_number') || null;
+  const addressLine1 = find('address_line1', 'address', 'street', 'street_address') || null;
+  const city = find('city', 'town') || null;
+  const state = find('state', 'province', 'region') || null;
+  const zip = find('zip', 'zipcode', 'zip_code', 'postal', 'postal_code') || null;
+  const notes = find('notes', 'note', 'comments', 'comment', 'memo') || null;
+
+  // Also handle a single "name" column by splitting on first space
+  let derivedFirst = firstName;
+  let derivedLast = lastName;
+  if (!derivedFirst && !derivedLast) {
+    const fullName = find('name', 'client_name', 'customer_name', 'full_name', 'display_name', 'client');
+    if (fullName) {
+      const parts = fullName.trim().split(/\s+/);
+      derivedFirst = parts[0] || null;
+      derivedLast = parts.length > 1 ? parts.slice(1).join(' ') : null;
+    }
+  }
+
+  // Must have at least a name, email, or company
+  if (!derivedFirst && !derivedLast && !companyName && !email) return null;
+
+  return { first_name: derivedFirst, last_name: derivedLast, company_name: companyName, email, phone, address_line1: addressLine1, city, state, zip, notes };
+}
+
+// ── Client Import (CSV direct → AI fallback → bulk insert) ──
 app.post('/api/clients/import', authenticate, requireAdmin, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-    if (!openaiClient) return res.status(503).json({ error: 'AI service not configured' });
 
     const fileContent = req.file.buffer.toString('utf-8').substring(0, 15000);
-    const fileName = req.file.originalname;
+    const fileName = sanitizeFilename(req.file.originalname);
     const mimeType = req.file.mimetype;
 
     console.log(`[clients/import] Parsing "${fileName}" (${mimeType}, ${req.file.size} bytes) for company ${req.user.companyId}`);
 
-    const aiResponse = await openaiClient.chat.completions.create({
-      model: config.openai.model,
-      messages: [
-        {
-          role: 'system',
-          content: `You are an expert at parsing client/customer lists for a landscape company. These come in many formats — spreadsheets, CSVs, CRM exports, handwritten lists, etc. Extract structured client data from the provided content.
+    // ── Try 1: Direct CSV parse (no AI cost) ──
+    let clientsList = [];
+    let parseMethod = 'unknown';
+    const isCSV = fileName.endsWith('.csv') || mimeType === 'text/csv' || mimeType === 'application/vnd.ms-excel';
+
+    if (isCSV) {
+      try {
+        const csvResult = parseCSV(fileContent);
+        if (csvResult && csvResult.rows.length > 0) {
+          const mapped = csvResult.rows.map(r => mapCSVToClient(r, csvResult.headers)).filter(Boolean);
+          if (mapped.length > 0) {
+            clientsList = mapped;
+            parseMethod = 'csv-direct';
+            console.log(`[clients/import] Direct CSV parse: ${mapped.length} clients`);
+          }
+        }
+      } catch (csvErr) {
+        console.log(`[clients/import] Direct CSV parse failed: ${csvErr.message}, trying AI fallback`);
+      }
+    }
+
+    // ── Try 2: AI fallback for non-CSV or when direct parse found nothing ──
+    if (clientsList.length === 0 && openaiClient) {
+      const aiResponse = await openaiClient.chat.completions.create({
+        model: config.openai.model,
+        messages: [
+          {
+            role: 'system',
+            content: `You are an expert at parsing client/customer lists for a landscape company. These come in many formats — spreadsheets, CSVs, CRM exports, handwritten lists, etc. Extract structured client data from the provided content.
 
 For each client found, return a JSON object with:
 {
@@ -955,22 +1021,29 @@ For each client found, return a JSON object with:
 
 Return: { "clients": [...], "warnings": ["any issues"] }
 Be thorough. Real client lists have inconsistent formatting, missing fields, and mixed layouts.`
-        },
-        {
-          role: 'user',
-          content: `Parse this client list (format: ${mimeType}, filename: ${fileName}). Extract all client data into structured JSON.\n\nContent:\n${fileContent}`
-        }
-      ],
-      response_format: { type: 'json_object' },
-      max_tokens: 4000,
-      temperature: 0.1,
-    });
+          },
+          {
+            role: 'user',
+            content: `Parse this client list (format: ${mimeType}, filename: ${fileName}). Extract all client data into structured JSON.\n\nContent:\n${fileContent}`
+          }
+        ],
+        response_format: { type: 'json_object' },
+        max_tokens: 4000,
+        temperature: 0.1,
+      });
 
-    const parsed = JSON.parse(aiResponse.choices[0].message.content);
-    const clientsList = parsed.clients || [];
+      const parsed = JSON.parse(aiResponse.choices[0].message.content);
+      clientsList = parsed.clients || [];
+      parseMethod = 'ai';
+    }
+
+    // ── Try 3: No AI available and not a CSV — fail gracefully ──
+    if (clientsList.length === 0 && !openaiClient && !isCSV) {
+      return res.status(503).json({ error: 'Please upload a CSV file. AI parsing is not configured for other file formats.' });
+    }
 
     if (clientsList.length === 0) {
-      return res.json({ message: 'No clients found in file', imported: 0, warnings: parsed.warnings || [] });
+      return res.json({ message: 'No clients found in file', imported: 0, method: parseMethod, warnings: [] });
     }
 
     let imported = 0;
@@ -1015,7 +1088,8 @@ Be thorough. Real client lists have inconsistent formatting, missing fields, and
       message: `Successfully imported ${imported} clients`,
       imported,
       total: clientsList.length,
-      warnings: [...(parsed.warnings || []), ...errors],
+      method: parseMethod,
+      warnings: errors,
     });
   } catch (err) {
     console.error('[clients/import] Error:', err.message);
@@ -1614,26 +1688,26 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
         { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
       );
     }
-    promptParts.push({ text: `⚠️ THIS IS A BED EDGE RESHAPING TASK ONLY. You are NOT designing a landscape. You are NOT adding plants. You are ONLY reshaping the bed-to-lawn boundary line.
+    promptParts.push({ text: `⚠️ THIS IS A BED EDGE RESHAPING TASK ONLY. You are ONLY changing the border/boundary line where the mulch bed meets the lawn.
 
-${hasMask ? `⚠️⚠️⚠️ CRITICAL — THE ORANGE SHADED AREA IN THE ANNOTATED PHOTO IS THE NEW BED SHAPE:
-The orange/red overlay on the second photo shows the EXACT area the client drew as the new bed boundary. Your output MUST match this shape:
+${hasMask ? `THE ORANGE SHADED AREA IN THE ANNOTATED PHOTO SHOWS THE NEW BED PERIMETER:
+The orange/red overlay outlines where the new bed EDGE should be. The outer edge of the orange area = the new bed-to-lawn transition line.
+- Use the CLEAN photo as the base (no orange overlay in the result)
+- Reshape ONLY the bed-to-lawn boundary to match the drawn perimeter
+- Where the new boundary extends beyond the current bed, replace ONLY the grass in that strip with mulch
+- Where the new boundary is smaller than the current bed, replace ONLY the mulch in that strip with grass` : 'Reshape the EXISTING landscape bed edge visible in the photo.'}
 
-- The outer edge of the orange shaded area = the new bed edge line
-- ALL grass/lawn inside the orange area must be REPLACED with mulch
-- The bed is being EXPANDED significantly — the new bed extends much further into the lawn than the current bed
-- Your output must use the CLEAN photo as the base (no orange overlay in the result) but reshape the bed to match the overlay boundary
-- Do NOT default to the existing bed edge. The existing edge is being replaced by the drawn boundary.` : 'Reshape the EXISTING landscape bed edge visible in the photo.'}
+⛔⛔⛔ ABSOLUTE RULE — ZERO PLANT CHANGES ⛔⛔⛔
+Every single plant, shrub, tree, vine, flower, and piece of vegetation visible in the photo MUST remain EXACTLY as-is — same position, same size, same color, same shape. Do NOT remove, add, move, resize, recolor, or alter ANY plant in ANY way. Plants that are inside the bed stay inside the bed. Plants on the wall stay on the wall. This is NON-NEGOTIABLE.
 
-STRICT BED EDGE RESHAPING RULES:
-1. The bed edge style MUST be: ${edgeDesc}
+BED EDGE RULES:
+1. Edge style: ${edgeDesc}
 2. ${adjustDesc}
-3. ALL area inside the ${hasMask ? 'drawn boundary (orange overlay area)' : 'bed boundary'}: must be mulch bed. Any lawn or grass currently inside this area must be REMOVED and replaced with fresh mulch matching the existing bed mulch color and texture. The existing mulch stays. New areas get new mulch.
-4. ALL area outside the ${hasMask ? 'drawn boundary' : 'bed boundary'}: remains lawn/grass. Do not touch it.
-5. The edge transition must be a clean, crisp, professionally cut steel-edge line — sharp and defined with a slight trench reveal. No gradual fade, no soft blending.
-6. DO NOT modify the house, driveway, sidewalk, fence, trees, or any structure. ONLY reshape the bed-to-lawn boundary.
-7. ⛔ ZERO PLANT CHANGES — Do NOT add ANY new plants. Do NOT remove ANY existing plants. Do NOT move, resize, recolor, or alter ANY vegetation. Every plant, shrub, tree, and blade of grass must remain PIXEL-IDENTICAL to the input photo. The ONLY change is the bed edge shape and the mulch fill.
-8. The result must look like a real photograph with natural lighting and shadows.` });
+3. ONLY modify the narrow strip where bed meets lawn — the transition line. Existing mulch areas stay as mulch. Existing lawn areas outside the new boundary stay as lawn.
+4. The edge transition: clean, crisp, professionally cut steel-edge line with a slight trench reveal. Sharp and defined.
+5. DO NOT modify the house, driveway, sidewalk, fence, or any structure.
+6. ALL existing plants, shrubs, trees, and vegetation must remain PIXEL-IDENTICAL. The ONLY change is the edge line and any thin strip of new mulch or grass at the boundary.
+7. The result must look like a real photograph with natural lighting and shadows.` });
 
 
     console.log('[bed-edge] Calling Gemini...');
@@ -3591,7 +3665,7 @@ app.post('/api/projects/:projectId/submittals/generate', authenticate, async (re
     await db.query('UPDATE projects SET status = $1 WHERE id = $2', ['submittal_sent', project.id]);
     await logActivity(req.user.companyId, req.user.userId, 'submittal', submittal.id, 'generate', 'Submittal generated');
 
-    res.status(201).json(submittal);
+    res.status(201).json({ ...submittal, narrative: submittal.scope_narrative });
   } catch (err) {
     console.error('Submittal generation error:', err);
     res.status(500).json({ error: 'Failed to generate submittal' });
@@ -3604,7 +3678,7 @@ app.get('/api/submittals/:id', authenticate, async (req, res) => {
     if (!submittal) return res.status(404).json({ error: 'Submittal not found' });
 
     const plantProfiles = await db.getMany('SELECT * FROM submittal_plant_profiles WHERE submittal_id = $1 ORDER BY sort_order', [submittal.id]);
-    res.json({ ...submittal, plantProfiles });
+    res.json({ ...submittal, narrative: submittal.scope_narrative, plantProfiles });
   } catch (err) {
     console.error('GET /api/submittals/:id error:', err.message);
     res.status(500).json({ error: 'Failed to load submittal' });
@@ -3615,11 +3689,16 @@ app.put('/api/submittals/:id', authenticate, async (req, res) => {
   try {
     const submittal = await db.getOne('SELECT id FROM submittals WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
     if (!submittal) return res.status(404).json({ error: 'Submittal not found' });
-    const allowed = ['scope_narrative', 'closing_statement', 'warranty_text', 'notes', 'status'];
+    const stringFields = ['scope_narrative', 'closing_statement', 'warranty_text', 'notes'];
+    const allowed = [...stringFields, 'status'];
     const updates = [], values = [];
     let idx = 1;
     for (const key of allowed) {
-      if (req.body[key] !== undefined) { updates.push(`${key} = $${idx}`); values.push(req.body[key]); idx++; }
+      if (req.body[key] !== undefined) {
+        updates.push(`${key} = $${idx}`);
+        values.push(stringFields.includes(key) ? stripHtml(req.body[key]) : req.body[key]);
+        idx++;
+      }
     }
     if (updates.length === 0) return res.json({ message: 'No fields to update' });
     values.push(req.params.id);
@@ -3920,24 +3999,21 @@ function mapStripeStatus(stripeStatus) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// CRM INTEGRATION HELPER
+// CRM INTEGRATION
 // ═══════════════════════════════════════════════════════════════════
+
+const crmManager = new CRMManager(db);
 
 async function triggerCrmSync(companyId, entityType, entityId, action, data) {
   // Fire-and-forget — never crashes calling route
   try {
-    const integration = await db.getOne(
-      'SELECT * FROM crm_integrations WHERE company_id = $1 AND is_active = true',
-      [companyId]
-    );
-    if (!integration) return;
-
-    await db.query(
-      `INSERT INTO crm_sync_log (crm_integration_id, company_id, entity_type, entity_id, action, request_payload)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [integration.id, companyId, entityType, entityId, action, data]
-    );
-    // Async CRM push will be handled by the CRM integration module
+    if (entityType === 'client') {
+      await crmManager.syncClient(companyId, entityId);
+    } else if (entityType === 'project') {
+      await crmManager.syncProject(companyId, entityId);
+    } else if (entityType === 'estimate') {
+      await crmManager.syncEstimate(companyId, entityId);
+    }
   } catch (err) {
     console.error('[triggerCrmSync] Failed (non-fatal):', err.message);
   }
@@ -4311,53 +4387,10 @@ app.get('/api/billing/invoices', authenticate, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
-// CRM ROUTES (stubs — full integration pending)
+// CRM ROUTES (mounted from filo-crm-framework.js)
 // ═══════════════════════════════════════════════════════════════════
 
-app.get('/api/crm/status', authenticate, async (req, res) => {
-  try {
-    const integration = await db.getOne(
-      'SELECT * FROM crm_integrations WHERE company_id = $1 LIMIT 1',
-      [req.user.companyId]
-    );
-    res.json({ connected: !!integration, integration: integration || null });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/crm/providers', authenticate, (req, res) => {
-  res.json({ providers: ['jobber', 'housecall_pro', 'service_titan', 'aspire'] });
-});
-
-app.post('/api/crm/connect', authenticate, requireAdmin, async (req, res) => {
-  res.status(501).json({ error: 'CRM OAuth connect not yet implemented. Contact support.' });
-});
-
-app.post('/api/crm/disconnect', authenticate, requireAdmin, async (req, res) => {
-  try {
-    await db.query('DELETE FROM crm_integrations WHERE company_id = $1', [req.user.companyId]);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/crm/sync/full/:projectId', authenticate, async (req, res) => {
-  res.status(501).json({ error: 'CRM full sync not yet implemented.' });
-});
-
-app.get('/api/crm/sync-log', authenticate, async (req, res) => {
-  try {
-    const log = await db.getMany(
-      'SELECT * FROM crm_sync_log WHERE company_id = $1 ORDER BY created_at DESC LIMIT 50',
-      [req.user.companyId]
-    );
-    res.json({ log });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+mountCRMRoutes(app, crmManager, authenticate, requireAdmin);
 
 // ═══════════════════════════════════════════════════════════════════
 // PDF ROUTES (stubs — filo-pdf-engine.js not yet mounted)
