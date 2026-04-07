@@ -86,7 +86,7 @@ class BaseCRMAdapter {
     await this.db.query(
       `INSERT INTO crm_sync_log (crm_integration_id, company_id, entity_type, entity_id, action, status, request_payload, response_payload, error_message, synced_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [this.integration.id, this.integration.company_id, entityType, entityId, action, status, requestPayload, responsePayload, error, status === 'synced' ? new Date() : null]
+      [this.integration.id, this.integration.company_id, entityType, entityId, action, status, requestPayload ? JSON.stringify(requestPayload) : null, responsePayload ? JSON.stringify(responsePayload) : null, error, status === 'synced' ? new Date() : null]
     );
 
     if (status === 'synced') {
@@ -123,6 +123,10 @@ class JobberAdapter extends BaseCRMAdapter {
       headers: this.headers,
       body: JSON.stringify({ query, variables }),
     });
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      throw new Error(`Jobber GraphQL HTTP ${response.status}: ${errText}`);
+    }
     const data = await response.json();
     if (data.errors) throw new Error(`Jobber GraphQL: ${data.errors[0].message}`);
     return data.data;
@@ -136,9 +140,16 @@ class JobberAdapter extends BaseCRMAdapter {
         grant_type: 'refresh_token',
         refresh_token: this.integration.oauth_refresh_token,
         client_id: this.integration.oauth_client_id,
+        client_secret: this.integration.api_secret,
       }),
     });
+    if (!response.ok) {
+      throw new Error(`Jobber OAuth refresh failed: ${response.status}`);
+    }
     const data = await response.json();
+    if (!data.access_token) {
+      throw new Error('Jobber OAuth response missing access_token');
+    }
     return {
       accessToken: data.access_token,
       refreshToken: data.refresh_token,
@@ -502,6 +513,7 @@ class YardbookAdapter extends GenericRESTAdapter {
 const ADAPTER_MAP = {
   jobber: JobberAdapter,
   servicetitan: ServiceTitanAdapter,
+  service_titan: ServiceTitanAdapter,
   lmn: LMNAdapter,
   aspire: AspireAdapter,
   singleops: SingleOpsAdapter,
@@ -678,7 +690,7 @@ export default class CRMManager {
   }
 
   async disconnect(companyId) {
-    await this.db.query('UPDATE crm_integrations SET is_active = false WHERE company_id = $1', [companyId]);
+    await this.db.query('UPDATE crm_integrations SET is_active = false, oauth_access_token = NULL, oauth_refresh_token = NULL WHERE company_id = $1', [companyId]);
     return { disconnected: true };
   }
 }
@@ -689,10 +701,16 @@ export default class CRMManager {
 
 export function mountCRMRoutes(app, crmManager, authenticate, requireAdmin) {
 
-  // Test CRM connection
+  // CRM connection status
   app.get('/api/crm/status', authenticate, async (req, res) => {
-    const result = await crmManager.testConnection(req.user.companyId);
-    res.json(result);
+    try {
+      const integration = await crmManager.getActiveIntegration(req.user.companyId);
+      if (!integration) return res.json({ connected: false, integration: null });
+      const testResult = await crmManager.testConnection(req.user.companyId).catch(() => ({ connected: false }));
+      res.json({ ...testResult, connected: !!integration, integration });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // Connect CRM
@@ -714,24 +732,40 @@ export function mountCRMRoutes(app, crmManager, authenticate, requireAdmin) {
 
   // Sync specific entity
   app.post('/api/crm/sync/client/:clientId', authenticate, async (req, res) => {
-    const result = await crmManager.syncClient(req.user.companyId, req.params.clientId);
-    res.json(result);
+    try {
+      const result = await crmManager.syncClient(req.user.companyId, req.params.clientId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.post('/api/crm/sync/project/:projectId', authenticate, async (req, res) => {
-    const result = await crmManager.syncProject(req.user.companyId, req.params.projectId);
-    res.json(result);
+    try {
+      const result = await crmManager.syncProject(req.user.companyId, req.params.projectId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.post('/api/crm/sync/estimate/:estimateId', authenticate, async (req, res) => {
-    const result = await crmManager.syncEstimate(req.user.companyId, req.params.estimateId);
-    res.json(result);
+    try {
+      const result = await crmManager.syncEstimate(req.user.companyId, req.params.estimateId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
-  // Full project sync (Step 10)
+  // Full project sync (Step 8 / CRM Push)
   app.post('/api/crm/sync/full/:projectId', authenticate, async (req, res) => {
-    const result = await crmManager.syncFullProject(req.user.companyId, req.params.projectId);
-    res.json(result);
+    try {
+      const result = await crmManager.syncFullProject(req.user.companyId, req.params.projectId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // Get sync log

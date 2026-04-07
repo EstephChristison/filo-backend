@@ -19,7 +19,7 @@ const config = {
 };
 
 // Defer instantiation — only create if key is present, avoids crash at import time
-const openai = config.openaiKey ? new OpenAI({ apiKey: config.openaiKey }) : null;
+const openai = config.openaiKey ? new OpenAI({ apiKey: config.openaiKey, timeout: 120_000 }) : null;
 const replicate = config.replicateToken ? new Replicate({ auth: config.replicateToken }) : null;
 
 // ─── System Prompts ──────────────────────────────────────────────

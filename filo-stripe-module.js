@@ -1,16 +1,17 @@
 // ═══════════════════════════════════════════════════════════════════
 // FILO — Stripe Subscription Management Module
-// Handles: $2,500/mo base plan, $500/mo per additional user,
+// Handles: $500/mo base plan (3 users), $99/mo per additional user,
 // subscription lifecycle, webhooks, lockout enforcement
 // ═══════════════════════════════════════════════════════════════════
 
 import Stripe from 'stripe';
+import express from 'express';
 
 // ─── Configuration ───────────────────────────────────────────────
 
 const PLAN_CONFIG = {
-  BASE_MONTHLY_PRICE: 2500_00,       // $2,500 in cents
-  ADDITIONAL_USER_PRICE: 500_00,     // $500 in cents
+  BASE_MONTHLY_PRICE: 500_00,        // $500 in cents
+  ADDITIONAL_USER_PRICE: 99_00,      // $99 in cents
   INCLUDED_USERS: 3,
   TRIAL_DAYS: 14,
   CURRENCY: 'usd',
@@ -294,7 +295,7 @@ export default class StripeManager {
   async resumeSubscription(companyId) {
     const company = await this.db.getOne('SELECT stripe_subscription_id FROM companies WHERE id = $1', [companyId]);
     const subscription = await this.stripe.subscriptions.update(company.stripe_subscription_id, {
-      pause_collection: '',
+      pause_collection: null,
     });
 
     await this.db.query("UPDATE subscriptions SET status = 'active' WHERE company_id = $1", [companyId]);

@@ -166,6 +166,36 @@ function sanitizeFilename(name) {
     .substring(0, 200) || 'upload';
 }
 
+// Password strength validation — enforces minimum complexity requirements
+function validatePassword(password) {
+  if (!password || password.length < 10) return 'Password must be at least 10 characters';
+  if (!/[A-Z]/.test(password)) return 'Password must contain at least one uppercase letter';
+  if (!/[a-z]/.test(password)) return 'Password must contain at least one lowercase letter';
+  if (!/[0-9]/.test(password)) return 'Password must contain at least one number';
+  return null;
+}
+
+// ─── SSRF Protection ───────────────────────────────────────────
+// Validates that a URL is either a data: URL or points to an allowed host (Supabase Storage).
+// Returns null if safe, or an error string if blocked.
+function validateUrlForSSRF(url) {
+  if (!url || typeof url !== 'string') return 'URL is required';
+  if (url.startsWith('data:')) return null; // data URLs are safe
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return 'Only HTTPS URLs are allowed';
+    const allowedHosts = [
+      config.supabaseStorage.url.replace(/^https?:\/\//, ''),
+      'yxgwtrbbczgffrzmjahe.supabase.co',
+    ];
+    const isAllowed = allowedHosts.some(h => parsed.hostname === h || parsed.hostname.endsWith('.' + h));
+    if (!isAllowed) return 'URL must be a Supabase Storage URL';
+    return null;
+  } catch {
+    return 'Invalid URL';
+  }
+}
+
 // ─── User Response Formatter ────────────────────────────────────
 // Issue 4 fix: Ensure consistent camelCase user object across all auth endpoints
 function formatUserResponse(user) {
@@ -254,7 +284,10 @@ const authLimiter = rateLimit({
 
 // ─── Auth Middleware ──────────────────────────────────────────────
 
-function authenticate(req, res, next) {
+// authenticateOnly — validates JWT only. No subscription check.
+// Use for routes that must work even when the account is locked:
+// auth, billing, webhooks, onboarding, health, export, company profile.
+function authenticateOnly(req, res, next) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'No token provided' });
 
@@ -265,6 +298,14 @@ function authenticate(req, res, next) {
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+}
+
+// authenticate — validates JWT AND enforces active subscription.
+// All data routes use this; locked accounts get 403 SUBSCRIPTION_LOCKED.
+function authenticate(req, res, next) {
+  authenticateOnly(req, res, () => {
+    requireActiveSubscription(req, res, next);
+  });
 }
 
 function requireAdmin(req, res, next) {
@@ -352,8 +393,9 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
     if (!EMAIL_RE.test(email) || email.length > 254) {
       return res.status(400).json({ error: 'Invalid email address' });
     }
-    if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    const pwError = validatePassword(password);
+    if (pwError) {
+      return res.status(400).json({ error: pwError });
     }
     if (companyName.length > 255 || firstName.length > 100 || lastName.length > 100) {
       return res.status(400).json({ error: 'One or more fields exceed maximum length' });
@@ -434,10 +476,9 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
       await bcrypt.compare(password, '$2b$12$notarealhashXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX');
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    if (!user.is_active) return res.status(403).json({ error: 'Account disabled' });
-
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user.is_active) return res.status(401).json({ error: 'Invalid credentials' });
 
     const token = jwt.sign(
       { userId: user.id, companyId: user.company_id, role: user.role },
@@ -467,7 +508,7 @@ app.post('/api/auth/login', authLimiter, async (req, res) => {
 });
 
 // ─── Refresh Token ───────────────────────────────────────────────
-app.post('/api/auth/refresh', async (req, res) => {
+app.post('/api/auth/refresh', authLimiter, async (req, res) => {
   try {
     const { refreshToken } = req.body;
     if (!refreshToken || typeof refreshToken !== 'string') {
@@ -480,26 +521,39 @@ app.post('/api/auth/refresh', async (req, res) => {
       [decoded.userId]
     );
 
-    let valid = false;
+    let matchedTokenId = null;
     for (const t of tokens) {
-      if (await bcrypt.compare(refreshToken, t.token_hash)) { valid = true; break; }
+      if (await bcrypt.compare(refreshToken, t.token_hash)) { matchedTokenId = t.id; break; }
     }
-    if (!valid) return res.status(401).json({ error: 'Invalid refresh token' });
+    if (!matchedTokenId) return res.status(401).json({ error: 'Invalid refresh token' });
 
-    const user = await db.getOne('SELECT id, company_id, role FROM users WHERE id = $1', [decoded.userId]);
+    // Revoke the used refresh token (single-use rotation)
+    await db.query('UPDATE refresh_tokens SET revoked = true WHERE id = $1', [matchedTokenId]);
+
+    const user = await db.getOne('SELECT id, company_id, role, is_active FROM users WHERE id = $1', [decoded.userId]);
+    if (!user || !user.is_active) return res.status(401).json({ error: 'Account disabled' });
+
     const newToken = jwt.sign(
       { userId: user.id, companyId: user.company_id, role: user.role },
       config.jwtSecret, { expiresIn: config.jwtExpiry }
     );
 
-    res.json({ token: newToken });
+    // Issue a new refresh token
+    const newRefreshToken = jwt.sign({ userId: user.id }, config.jwtRefreshSecret, { expiresIn: config.jwtRefreshExpiry });
+    const newRefreshHash = await bcrypt.hash(newRefreshToken, 12);
+    await db.query(
+      'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, NOW() + INTERVAL \'7 days\')',
+      [user.id, newRefreshHash]
+    );
+
+    res.json({ token: newToken, refreshToken: newRefreshToken });
   } catch (err) {
     res.status(401).json({ error: 'Invalid refresh token' });
   }
 });
 
 // ─── Logout ──────────────────────────────────────────────────────
-app.post('/api/auth/logout', authenticate, async (req, res) => {
+app.post('/api/auth/logout', authenticateOnly, async (req, res) => {
   try {
     await db.query('UPDATE refresh_tokens SET revoked = true WHERE user_id = $1', [req.user.userId]);
     res.json({ message: 'Logged out' });
@@ -511,12 +565,13 @@ app.post('/api/auth/logout', authenticate, async (req, res) => {
 });
 
 // ─── Invite User ─────────────────────────────────────────────────
-app.post('/api/auth/invite', authenticate, requireAdmin, async (req, res) => {
+app.post('/api/auth/invite', authenticateOnly, requireAdmin, async (req, res) => {
   try {
     const email = (req.body.email || '').trim().toLowerCase();
     const firstName = stripHtml(req.body.firstName);
     const lastName = stripHtml(req.body.lastName);
-    const role = req.body.role;
+    const VALID_ROLES = ['admin', 'estimator', 'designer', 'viewer'];
+    const role = VALID_ROLES.includes(req.body.role) ? req.body.role : 'estimator';
     if (!email || !firstName || !lastName) return res.status(400).json({ error: 'email, firstName, and lastName are required' });
     const inviteToken = uuidv4();
     const tempPassword = await bcrypt.hash(uuidv4(), 12);
@@ -540,7 +595,8 @@ app.post('/api/auth/accept-invite', async (req, res) => {
   try {
     const { inviteToken, password } = req.body;
     if (!inviteToken || !password) return res.status(400).json({ error: 'inviteToken and password are required' });
-    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    const pwError2 = validatePassword(password);
+    if (pwError2) return res.status(400).json({ error: pwError2 });
 
     const user = await db.getOne(
       `SELECT * FROM users WHERE invite_token = $1 AND invite_expires > NOW() AND is_active = true`,
@@ -597,7 +653,7 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
         [token, expires, user.id]
       );
       // TODO: Send actual email when email provider is configured
-      console.log(`[PASSWORD RESET] Token for ${email}: ${token} (expires ${expires.toISOString()})`);
+      console.log(`[PASSWORD RESET] Reset requested for user ${user.id} (expires ${expires.toISOString()})`);
     }
     res.json({ message: 'If an account with that email exists, a reset link has been sent.' });
   } catch (err) {
@@ -606,29 +662,13 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   }
 });
 
-// ─── Admin password reset (temporary — remove after use) ────────
-app.post('/api/auth/admin-reset', async (req, res) => {
-  try {
-    const { email, password, secret } = req.body;
-    if (secret !== 'filo-temp-reset-2026') return res.status(403).json({ error: 'Forbidden' });
-    const hash = await bcrypt.hash(password, 12);
-    const result = await db.query(
-      'UPDATE users SET password_hash = $1 WHERE LOWER(email) = LOWER($2) RETURNING id, email',
-      [hash, email]
-    );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
-    res.json({ message: 'Password reset', user: result.rows[0].email });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ─── Reset Password (with token) ───────────────────────────────
 app.post('/api/auth/reset-password', authLimiter, async (req, res) => {
   try {
     const { token, password } = req.body;
     if (!token || !password) return res.status(400).json({ error: 'Token and new password are required' });
-    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    const pwError3 = validatePassword(password);
+    if (pwError3) return res.status(400).json({ error: pwError3 });
 
     const user = await db.getOne(
       'SELECT id, email FROM users WHERE recovery_token = $1 AND recovery_sent_at > NOW()',
@@ -695,7 +735,7 @@ app.post('/api/auth/forgot-email', authLimiter, async (req, res) => {
 // COMPANY ROUTES
 // ═══════════════════════════════════════════════════════════════════
 
-app.get('/api/company', authenticate, async (req, res) => {
+app.get('/api/company', authenticateOnly, async (req, res) => {
   try {
     const company = await db.getOne('SELECT * FROM companies WHERE id = $1', [req.user.companyId]);
     if (!company) return res.status(404).json({ error: 'Company not found' });
@@ -706,7 +746,7 @@ app.get('/api/company', authenticate, async (req, res) => {
   }
 });
 
-app.put('/api/company', authenticate, requireAdmin, async (req, res) => {
+app.put('/api/company', authenticateOnly, requireAdmin, async (req, res) => {
   try {
     const fields = req.body;
 
@@ -765,7 +805,7 @@ app.put('/api/company', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-app.put('/api/company/onboarding', authenticate, requireAdmin, async (req, res) => {
+app.put('/api/company/onboarding', authenticateOnly, requireAdmin, async (req, res) => {
   try {
     await db.query('UPDATE companies SET onboarding_completed = true WHERE id = $1', [req.user.companyId]);
     res.json({ message: 'Onboarding completed', onboardingCompleted: true });
@@ -775,7 +815,7 @@ app.put('/api/company/onboarding', authenticate, requireAdmin, async (req, res) 
 });
 
 // --- Issue 5 fix: Add POST /api/onboarding/complete as an alternative endpoint ---
-app.post('/api/onboarding/complete', authenticate, async (req, res) => {
+app.post('/api/onboarding/complete', authenticateOnly, async (req, res) => {
   try {
     await db.query('UPDATE companies SET onboarding_completed = true WHERE id = $1', [req.user.companyId]);
     res.json({ message: 'Onboarding completed', onboardingCompleted: true });
@@ -788,7 +828,7 @@ app.post('/api/onboarding/complete', authenticate, async (req, res) => {
 // CLIENT ROUTES
 // ═══════════════════════════════════════════════════════════════════
 
-app.get('/api/clients', authenticate, requireActiveSubscription, async (req, res) => {
+app.get('/api/clients', authenticate, async (req, res) => {
   try {
     const { search, page = 1, limit = 50 } = req.query;
     const offset = (page - 1) * limit;
@@ -820,7 +860,7 @@ app.get('/api/clients', authenticate, requireActiveSubscription, async (req, res
   }
 });
 
-app.post('/api/clients', authenticate, requireActiveSubscription, async (req, res) => {
+app.post('/api/clients', authenticate, async (req, res) => {
   try {
     const b = req.body;
 
@@ -893,10 +933,15 @@ app.put('/api/clients/:id', authenticate, async (req, res) => {
   try {
     const fields = req.body;
     const allowed = ['display_name', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'notes'];
+    const stringFields = ['display_name', 'first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'state', 'notes'];
     const updates = [], values = [];
     let idx = 1;
     for (const key of allowed) {
-      if (fields[key] !== undefined) { updates.push(`${key} = $${idx}`); values.push(fields[key]); idx++; }
+      if (fields[key] !== undefined) {
+        updates.push(`${key} = $${idx}`);
+        values.push(stringFields.includes(key) ? stripHtml(String(fields[key])) : fields[key]);
+        idx++;
+      }
     }
     if (updates.length === 0) return res.status(400).json({ error: 'No valid fields to update' });
     values.push(req.params.id, req.user.companyId);
@@ -1101,7 +1146,7 @@ Be thorough. Real client lists have inconsistent formatting, missing fields, and
 // PROJECT ROUTES
 // ═══════════════════════════════════════════════════════════════════
 
-app.get('/api/projects', authenticate, requireActiveSubscription, async (req, res) => {
+app.get('/api/projects', authenticate, async (req, res) => {
   try {
     const { status, clientId, page = 1, limit = 50 } = req.query;
     let query = 'SELECT * FROM v_active_projects WHERE company_id = $1';
@@ -1121,7 +1166,7 @@ app.get('/api/projects', authenticate, requireActiveSubscription, async (req, re
   }
 });
 
-app.post('/api/projects', authenticate, requireActiveSubscription, async (req, res) => {
+app.post('/api/projects', authenticate, async (req, res) => {
   try {
     const b = req.body;
     // Accept both camelCase and snake_case field names from frontend
@@ -1388,7 +1433,12 @@ app.delete('/api/existing-plants/:id', authenticate, async (req, res) => {
       [req.params.id, req.user.companyId]
     );
     if (!owned) return res.status(404).json({ error: 'Plant not found' });
-    await db.query('DELETE FROM existing_plants WHERE id = $1', [req.params.id]);
+    await db.query(
+      `DELETE FROM existing_plants WHERE id = $1 AND property_area_id IN (
+        SELECT pa.id FROM property_areas pa JOIN projects p ON p.id = pa.project_id WHERE p.company_id = $2
+      )`,
+      [req.params.id, req.user.companyId]
+    );
     res.json({ success: true });
   } catch (err) {
     console.error('DELETE /api/existing-plants/:id error:', err.message);
@@ -1416,12 +1466,12 @@ app.put('/api/existing-plants/:id/mark', authenticate, async (req, res) => {
     if (rename && rename.trim()) {
       plant = await db.getOne(
         'UPDATE existing_plants SET mark = $1, identified_name = $2 WHERE id = $3 RETURNING *',
-        [mark, rename.trim(), req.params.id]
+        [mark, stripHtml(rename.trim()), req.params.id]
       );
     } else {
       plant = await db.getOne(
         'UPDATE existing_plants SET mark = $1, comment = $2 WHERE id = $3 RETURNING *',
-        [mark, comment || '', req.params.id]
+        [mark, stripHtml(comment || ''), req.params.id]
       );
     }
     res.json(plant);
@@ -1440,20 +1490,9 @@ app.post('/api/removal-preview', authenticate, async (req, res) => {
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
     if (!maskDataUrl) return res.status(400).json({ error: 'Draw on the photo first to mark areas for removal' });
 
-    // SSRF protection — only allow Supabase Storage URLs or data URLs
-    const allowedHosts = [
-      config.supabaseStorage.url.replace(/^https?:\/\//, ''),
-      'yxgwtrbbczgffrzmjahe.supabase.co',
-    ];
-    if (!photoUrl.startsWith('data:')) {
-      try {
-        const parsedUrl = new URL(photoUrl);
-        const isAllowed = allowedHosts.some(h => parsedUrl.hostname === h || parsedUrl.hostname.endsWith('.' + h));
-        if (!isAllowed) return res.status(400).json({ error: 'photoUrl must be a Supabase Storage URL' });
-      } catch {
-        return res.status(400).json({ error: 'Invalid photoUrl' });
-      }
-    }
+    // SSRF protection
+    const ssrfError = validateUrlForSSRF(photoUrl);
+    if (ssrfError) return res.status(400).json({ error: ssrfError });
 
     console.log('[removal-preview] Downloading original photo...');
     let photoBuffer;
@@ -1563,19 +1602,8 @@ app.post('/api/bed-edge-preview', authenticate, async (req, res) => {
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
 
     // SSRF protection
-    const allowedHosts = [
-      config.supabaseStorage.url.replace(/^https?:\/\//, ''),
-      'yxgwtrbbczgffrzmjahe.supabase.co',
-    ];
-    if (!photoUrl.startsWith('data:')) {
-      try {
-        const parsedUrl = new URL(photoUrl);
-        const isAllowed = allowedHosts.some(h => parsedUrl.hostname === h || parsedUrl.hostname.endsWith('.' + h));
-        if (!isAllowed) return res.status(400).json({ error: 'photoUrl must be a Supabase Storage URL' });
-      } catch {
-        return res.status(400).json({ error: 'Invalid photoUrl' });
-      }
-    }
+    const ssrfErrBed = validateUrlForSSRF(photoUrl);
+    if (ssrfErrBed) return res.status(400).json({ error: ssrfErrBed });
 
     const hasMask = maskDataUrl && maskDataUrl.startsWith('data:');
     console.log('[bed-edge] Downloading photo... hasMask:', hasMask);
@@ -1764,20 +1792,9 @@ app.post('/api/design-render', authenticate, async (req, res) => {
     if (!photoUrl) return res.status(400).json({ error: 'photoUrl is required' });
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
 
-    // SSRF protection — only allow Supabase Storage URLs or data URLs
-    if (!photoUrl.startsWith('data:')) {
-      try {
-        const parsedPhotoUrl = new URL(photoUrl);
-        const allowedHosts = [
-          config.supabaseStorage.url.replace(/^https?:\/\//, ''),
-          'yxgwtrbbczgffrzmjahe.supabase.co',
-        ];
-        const isAllowed = allowedHosts.some(h => parsedPhotoUrl.hostname === h || parsedPhotoUrl.hostname.endsWith('.' + h));
-        if (!isAllowed) return res.status(400).json({ error: 'photoUrl must be a Supabase Storage URL' });
-      } catch {
-        return res.status(400).json({ error: 'Invalid photoUrl' });
-      }
-    }
+    // SSRF protection
+    const ssrfErrRender = validateUrlForSSRF(photoUrl);
+    if (ssrfErrRender) return res.status(400).json({ error: ssrfErrRender });
 
     const isRemovalPreview = photoUrl.startsWith('data:');
     console.log('[design-render] Photo source: %s (%s)', isRemovalPreview ? 'REMOVAL PREVIEW (data URL)' : 'ORIGINAL PHOTO (URL)', isRemovalPreview ? Math.round(photoUrl.length / 1024) + 'KB base64' : photoUrl.substring(0, 80));
@@ -1932,6 +1949,8 @@ app.post('/api/design-adjust', authenticate, async (req, res) => {
   try {
     const { renderDataUrl, pinX, pinY, radius, prompt } = req.body;
     if (!renderDataUrl) return res.status(400).json({ error: 'renderDataUrl is required' });
+    const ssrfErr1 = validateUrlForSSRF(renderDataUrl);
+    if (ssrfErr1) return res.status(400).json({ error: ssrfErr1 });
     if (pinX == null || pinY == null) return res.status(400).json({ error: 'pinX and pinY are required' });
     if (!prompt || !prompt.trim()) return res.status(400).json({ error: 'prompt is required' });
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
@@ -2060,6 +2079,8 @@ app.post('/api/design-night-mode', authenticate, async (req, res) => {
   try {
     const { renderDataUrl } = req.body;
     if (!renderDataUrl) return res.status(400).json({ error: 'renderDataUrl is required' });
+    const ssrfErr2 = validateUrlForSSRF(renderDataUrl);
+    if (ssrfErr2) return res.status(400).json({ error: ssrfErr2 });
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
 
     console.log('[night-mode] Converting design to nighttime with landscape lighting...');
@@ -2159,6 +2180,8 @@ app.post('/api/design-hardscape', authenticate, async (req, res) => {
   try {
     const { renderDataUrl, maskDataUrl, prompt } = req.body;
     if (!renderDataUrl) return res.status(400).json({ error: 'renderDataUrl is required' });
+    const ssrfErr3 = validateUrlForSSRF(renderDataUrl);
+    if (ssrfErr3) return res.status(400).json({ error: ssrfErr3 });
     if (!maskDataUrl) return res.status(400).json({ error: 'Draw on the design to mark the hardscape area' });
     if (!prompt || !prompt.trim()) return res.status(400).json({ error: 'Describe the hardscape change you want' });
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
@@ -2456,7 +2479,10 @@ app.post('/api/upload/photos', authenticate, (req, res) => {
 app.post('/api/upload/presign', authenticate, async (req, res) => {
   try {
     const { fileName, fileType, contentType } = req.body;
-    const key = `${req.user.companyId}/${fileType}/${uuidv4()}-${fileName}`;
+    const VALID_FILE_TYPES = ['photo', 'logo', 'document', 'rendering', 'submittal_pdf', 'estimate_pdf', 'nursery_list'];
+    if (!fileName || !fileType) return res.status(400).json({ error: 'fileName and fileType are required' });
+    if (!VALID_FILE_TYPES.includes(fileType)) return res.status(400).json({ error: `Invalid fileType. Must be one of: ${VALID_FILE_TYPES.join(', ')}` });
+    const key = `${req.user.companyId}/${fileType}/${uuidv4()}-${sanitizeFilename(fileName)}`;
 
     if (supaStorage) {
       const signedUrl = await supaStorage.createSignedUploadUrl(key);
@@ -2554,10 +2580,15 @@ app.put('/api/plants/:id', authenticate, requireAdmin, async (req, res) => {
       foliageColor: 'foliage_color', imageUrl: 'image_url', poeticDescription: 'poetic_description',
       retailPrice: 'retail_price', wholesalePrice: 'wholesale_price', isNative: 'is_native', isAvailable: 'is_available',
       sortOrder: 'sort_order' };
+    const numericFields = ['retail_price', 'wholesale_price', 'sort_order'];
+    const boolFields = ['is_native', 'is_available'];
     const normalized = {};
     for (const [k, v] of Object.entries(p)) {
       const col = camelToSnake[k] || k;
-      if (allowed.includes(col)) normalized[col] = v;
+      if (allowed.includes(col)) {
+        if (numericFields.includes(col) || boolFields.includes(col)) normalized[col] = v;
+        else normalized[col] = typeof v === 'string' ? stripHtml(v) : v;
+      }
     }
     if (Object.keys(normalized).length === 0) return res.json({ message: 'No fields to update' });
     const updates = [], values = [];
@@ -2680,7 +2711,7 @@ function mapCSVToPlant(row, headers) {
     if (!val) return null;
     const cleaned = String(val).replace(/[$,\s]/g, '');
     const num = parseFloat(cleaned);
-    return isNaN(num) || num === 0 ? null : num;
+    return isNaN(num) ? null : num;
   };
 
   // Try to extract container size from the name (e.g. "Agave Blue Glow 2 Gallon" → "2-gal")
@@ -2714,7 +2745,8 @@ app.post('/api/plants/import', authenticate, requireAdmin, upload.single('file')
 
     const fileName = sanitizeFilename(req.file.originalname);
     const mimeType = req.file.mimetype;
-    const fileContent = req.file.buffer.toString('utf-8');
+    const isBinary = /\.(xlsx|xls|pdf)$/i.test(fileName) || mimeType.includes('spreadsheet') || mimeType.includes('excel') || mimeType === 'application/pdf';
+    const fileContent = isBinary ? null : req.file.buffer.toString('utf-8');
 
     console.log(`[plants/import] Parsing "${fileName}" (${mimeType}, ${req.file.size} bytes) for company ${req.user.companyId}`);
 
@@ -2723,7 +2755,7 @@ app.post('/api/plants/import', authenticate, requireAdmin, upload.single('file')
     let parseMethod = 'unknown';
 
     // ─── Try 1: Direct CSV parse (fast, no AI cost) ───
-    const isCSV = fileName.endsWith('.csv') || mimeType === 'text/csv' || mimeType === 'application/vnd.ms-excel';
+    const isCSV = !isBinary && (fileName.endsWith('.csv') || mimeType === 'text/csv' || mimeType === 'application/vnd.ms-excel');
     if (isCSV) {
       try {
         const csvData = parseCSV(fileContent);
@@ -2750,7 +2782,7 @@ app.post('/api/plants/import', authenticate, requireAdmin, upload.single('file')
     if (plantsList.length === 0) {
       if (!openaiClient) {
         // No AI available — try brute force CSV on any text file
-        try {
+        if (fileContent) try {
           const csvData = parseCSV(fileContent);
           if (csvData && csvData.rows.length > 0) {
             for (const row of csvData.rows) {
@@ -2760,11 +2792,14 @@ app.post('/api/plants/import', authenticate, requireAdmin, upload.single('file')
             parseMethod = 'csv-fallback';
           }
         } catch (e) { /* ignore */ }
+        else warnings.push('Binary file requires AI parsing — skipping CSV fallback');
         if (plantsList.length === 0) {
           return res.status(503).json({ error: 'Could not parse file. Please upload a CSV with column headers (e.g. name, size, price).' });
         }
       } else {
-        const truncated = fileContent.substring(0, 15000);
+        const aiContentPayload = isBinary
+          ? `Parse this product list (format: ${mimeType}, filename: ${fileName}). The file is base64-encoded binary. Extract all items into structured JSON.\n\nBase64:\n${req.file.buffer.toString('base64').substring(0, 20000)}`
+          : `Parse this product list (format: ${mimeType}, filename: ${fileName}). Extract all items into structured JSON.\n\nContent:\n${fileContent.substring(0, 15000)}`;
         const aiResponse = await openaiClient.chat.completions.create({
           model: config.openai.model,
           messages: [
@@ -2791,7 +2826,7 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
             },
             {
               role: 'user',
-              content: `Parse this product list (format: ${mimeType}, filename: ${fileName}). Extract all items into structured JSON.\n\nContent:\n${truncated}`
+              content: aiContentPayload
             }
           ],
           response_format: { type: 'json_object' },
@@ -2819,7 +2854,16 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
         if (!safeName) { errors.push('Skipped row with empty name'); continue; }
         await db.getOne(
           `INSERT INTO plant_library (company_id, common_name, botanical_name, category, container_size, sun_requirement, water_needs, wholesale_price, retail_price, is_native, description, is_available)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true) RETURNING id`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)
+           ON CONFLICT (company_id, common_name, container_size) WHERE container_size IS NOT NULL
+           DO UPDATE SET botanical_name = COALESCE(EXCLUDED.botanical_name, plant_library.botanical_name),
+             category = COALESCE(EXCLUDED.category, plant_library.category),
+             wholesale_price = COALESCE(EXCLUDED.wholesale_price, plant_library.wholesale_price),
+             retail_price = COALESCE(EXCLUDED.retail_price, plant_library.retail_price),
+             sun_requirement = COALESCE(EXCLUDED.sun_requirement, plant_library.sun_requirement),
+             water_needs = COALESCE(EXCLUDED.water_needs, plant_library.water_needs),
+             updated_at = NOW()
+           RETURNING id`,
           [
             req.user.companyId,
             safeName,
@@ -2828,8 +2872,8 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
             p.container_size ? stripHtml(p.container_size) : null,
             p.sun_requirement || null,
             p.water_needs || null,
-            p.wholesale_price || null,
-            p.retail_price || null,
+            p.wholesale_price ?? null,
+            p.retail_price ?? null,
             p.is_native || false,
             p.notes ? stripHtml(p.notes) : null,
           ]
@@ -2861,7 +2905,7 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
 // DESIGN / AI ROUTES
 // ═══════════════════════════════════════════════════════════════════
 
-app.post('/api/projects/:projectId/designs/generate', authenticate, requireActiveSubscription, async (req, res) => {
+app.post('/api/projects/:projectId/designs/generate', authenticate, async (req, res) => {
   try {
     const project = await db.getOne('SELECT * FROM projects WHERE id = $1 AND company_id = $2', [req.params.projectId, req.user.companyId]);
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -3527,12 +3571,13 @@ app.post('/api/estimates/:id/line-items', authenticate, async (req, res) => {
     const price = parseFloat(unitPrice);
     const qty = parseFloat(quantity);
     if (isNaN(price) || price < 0) return res.status(400).json({ error: 'unitPrice must be a non-negative number' });
+    if (isNaN(qty) || qty <= 0) return res.status(400).json({ error: 'quantity must be greater than 0' });
     const totalPrice = Math.round(price * qty * 100) / 100;
     const maxSort = await db.getOne('SELECT COALESCE(MAX(sort_order), -1) as max FROM estimate_line_items WHERE estimate_id = $1', [req.params.id]);
     const item = await db.getOne(
       `INSERT INTO estimate_line_items (estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order, notes)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.params.id, category, description || category, qty, unit, price, totalPrice, (maxSort?.max ?? -1) + 1, notes || null]
+      [req.params.id, category, stripHtml(description || category), qty, unit, price, totalPrice, (maxSort?.max ?? -1) + 1, notes ? stripHtml(notes) : null]
     );
     // Recalculate totals
     const items = await db.getMany('SELECT total_price FROM estimate_line_items WHERE estimate_id = $1', [req.params.id]);
@@ -3559,6 +3604,7 @@ app.put('/api/estimates/:id/line-items/:lineItemId', authenticate, async (req, r
     if (!existing) return res.status(404).json({ error: 'Line item not found' });
     const price = unitPrice !== undefined ? parseFloat(unitPrice) : parseFloat(existing.unit_price);
     const qty = quantity !== undefined ? parseFloat(quantity) : parseFloat(existing.quantity);
+    const desc = description !== undefined ? stripHtml(description) : existing.description;
     if (isNaN(price) || isNaN(qty) || price < 0 || qty < 0) {
       return res.status(400).json({ error: 'unitPrice and quantity must be non-negative numbers' });
     }
@@ -3566,13 +3612,13 @@ app.put('/api/estimates/:id/line-items/:lineItemId', authenticate, async (req, r
 
     const item = await db.getOne(
       'UPDATE estimate_line_items SET unit_price = $1, quantity = $2, description = $3, total_price = $4 WHERE id = $5 AND estimate_id = $6 RETURNING *',
-      [price, qty, description, totalPrice, req.params.lineItemId, req.params.id]
+      [price, qty, desc, totalPrice, req.params.lineItemId, req.params.id]
     );
     if (!item) return res.status(404).json({ error: 'Line item not found' });
 
     // Recalculate estimate totals
     const items = await db.getMany('SELECT total_price FROM estimate_line_items WHERE estimate_id = $1', [req.params.id]);
-    const subtotal = items.reduce((sum, i) => sum + parseFloat(i.total_price || 0), 0);
+    const subtotal = Math.round(items.reduce((sum, i) => sum + parseFloat(i.total_price || 0), 0) * 100) / 100;
     const taxAmount = estimate.tax_enabled ? Math.round(subtotal * parseFloat(estimate.tax_rate || 0) * 100) / 100 : 0;
 
     await db.query('UPDATE estimates SET subtotal = $1, tax_amount = $2, total = $3 WHERE id = $4',
@@ -3771,7 +3817,7 @@ app.post('/api/projects/:projectId/revisions/:revisionId/revert', authenticate, 
 // USERS / TEAM ROUTES
 // ═══════════════════════════════════════════════════════════════════
 
-app.get('/api/team', authenticate, async (req, res) => {
+app.get('/api/team', authenticateOnly, async (req, res) => {
   try {
     const users = await db.getMany(
       'SELECT id, email, first_name, last_name, role, is_active, last_login_at, created_at FROM users WHERE company_id = $1 ORDER BY created_at',
@@ -3784,7 +3830,7 @@ app.get('/api/team', authenticate, async (req, res) => {
   }
 });
 
-app.put('/api/team/:userId', authenticate, requireAdmin, async (req, res) => {
+app.put('/api/team/:userId', authenticateOnly, requireAdmin, async (req, res) => {
   try {
     const { role, isActive } = req.body;
     const user = await db.getOne(
@@ -3799,7 +3845,7 @@ app.put('/api/team/:userId', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/api/team/:userId', authenticate, requireAdmin, async (req, res) => {
+app.delete('/api/team/:userId', authenticateOnly, requireAdmin, async (req, res) => {
   try {
     if (req.params.userId === req.user.userId) return res.status(400).json({ error: 'Cannot deactivate yourself' });
     await db.query('UPDATE users SET is_active = false WHERE id = $1 AND company_id = $2', [req.params.userId, req.user.companyId]);
@@ -3811,7 +3857,7 @@ app.delete('/api/team/:userId', authenticate, requireAdmin, async (req, res) => 
 });
 
 // ─── Per-project export (used by wizard step 8 CRM push) ─────────
-app.get('/api/projects/:projectId/export', authenticate, async (req, res) => {
+app.get('/api/projects/:projectId/export', authenticateOnly, async (req, res) => {
   try {
     const project = await db.getOne('SELECT * FROM v_active_projects WHERE id = $1 AND company_id = $2', [req.params.projectId, req.user.companyId]);
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -3840,7 +3886,7 @@ app.get('/api/projects/:projectId/export', authenticate, async (req, res) => {
 // DATA EXPORT ROUTES
 // ═══════════════════════════════════════════════════════════════════
 
-app.get('/api/export/projects', authenticate, async (req, res) => {
+app.get('/api/export/projects', authenticateOnly, async (req, res) => {
   try {
     const projects = await db.getMany('SELECT * FROM projects WHERE company_id = $1', [req.user.companyId]);
     res.json(projects);
@@ -3850,7 +3896,7 @@ app.get('/api/export/projects', authenticate, async (req, res) => {
   }
 });
 
-app.get('/api/export/plants/csv', authenticate, async (req, res) => {
+app.get('/api/export/plants/csv', authenticateOnly, async (req, res) => {
   try {
     const plants = await db.getMany(
       'SELECT common_name, botanical_name, category, container_size, retail_price, sun_requirement, water_needs FROM plant_library WHERE company_id = $1 OR company_id IS NULL',
@@ -3936,7 +3982,7 @@ async function handleStripeWebhook(req, res) {
   // Log webhook (non-fatal — don't crash if log insert fails)
   try {
     await db.query(
-      'INSERT INTO webhook_events (source, event_type, event_id, payload) VALUES ($1, $2, $3, $4)',
+      'INSERT INTO webhook_events (source, event_type, event_id, payload) VALUES ($1, $2, $3, $4) ON CONFLICT (source, event_id) DO NOTHING',
       ['stripe', event.type, event.id, event.data]
     );
   } catch (logErr) {
@@ -3977,7 +4023,8 @@ async function handleStripeWebhook(req, res) {
         const invoice = event.data.object;
         await db.query(
           `UPDATE subscriptions SET status = 'active'
-           WHERE company_id = (SELECT id FROM companies WHERE stripe_customer_id = $1)`,
+           WHERE company_id = (SELECT id FROM companies WHERE stripe_customer_id = $1)
+             AND status IN ('past_due', 'locked')`,
           [invoice.customer]
         );
         break;
@@ -4256,7 +4303,7 @@ Write the narrative and closing statement as JSON.`,
 // BILLING (Stripe) ROUTES
 // ═══════════════════════════════════════════════════════════════════
 
-app.get('/api/billing/status', authenticate, async (req, res) => {
+app.get('/api/billing/status', authenticateOnly, async (req, res) => {
   try {
     const sub = await db.getOne(
       'SELECT * FROM subscriptions WHERE company_id = $1 ORDER BY created_at DESC LIMIT 1',
@@ -4268,7 +4315,7 @@ app.get('/api/billing/status', authenticate, async (req, res) => {
   }
 });
 
-app.post('/api/billing/subscribe', authenticate, requireAdmin, async (req, res) => {
+app.post('/api/billing/subscribe', authenticateOnly, requireAdmin, async (req, res) => {
   if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
   try {
     const { paymentMethodId } = req.body;
@@ -4306,15 +4353,14 @@ app.post('/api/billing/subscribe', authenticate, requireAdmin, async (req, res) 
     });
 
     await db.query(
-      `INSERT INTO subscriptions (company_id, stripe_subscription_id, stripe_customer_id, status, plan_name, current_period_start, current_period_end)
-       VALUES ($1, $2, $3, $4, $5, to_timestamp($6), to_timestamp($7))
+      `INSERT INTO subscriptions (company_id, stripe_subscription_id, status, current_period_start, current_period_end)
+       VALUES ($1, $2, $3, to_timestamp($4), to_timestamp($5))
        ON CONFLICT (company_id) DO UPDATE SET
          stripe_subscription_id = EXCLUDED.stripe_subscription_id,
-         stripe_customer_id = EXCLUDED.stripe_customer_id,
          status = EXCLUDED.status,
          current_period_start = EXCLUDED.current_period_start,
          current_period_end = EXCLUDED.current_period_end`,
-      [company.id, subscription.id, customerId, subscription.status, 'base',
+      [company.id, subscription.id, subscription.status,
        subscription.current_period_start, subscription.current_period_end]
     );
 
@@ -4325,7 +4371,7 @@ app.post('/api/billing/subscribe', authenticate, requireAdmin, async (req, res) 
   }
 });
 
-app.post('/api/billing/portal', authenticate, requireAdmin, async (req, res) => {
+app.post('/api/billing/portal', authenticateOnly, requireAdmin, async (req, res) => {
   if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
   try {
     const { returnUrl } = req.body;
@@ -4343,7 +4389,7 @@ app.post('/api/billing/portal', authenticate, requireAdmin, async (req, res) => 
   }
 });
 
-app.post('/api/billing/cancel', authenticate, requireAdmin, async (req, res) => {
+app.post('/api/billing/cancel', authenticateOnly, requireAdmin, async (req, res) => {
   if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
   try {
     const { immediate = false } = req.body;
@@ -4372,7 +4418,7 @@ app.post('/api/billing/cancel', authenticate, requireAdmin, async (req, res) => 
   }
 });
 
-app.get('/api/billing/invoices', authenticate, async (req, res) => {
+app.get('/api/billing/invoices', authenticateOnly, async (req, res) => {
   if (!stripe) return res.status(503).json({ error: 'Billing not configured' });
   try {
     const company = await db.getOne('SELECT stripe_customer_id FROM companies WHERE id = $1', [req.user.companyId]);
@@ -4550,7 +4596,8 @@ app.listen(config.port, async () => {
     const newStyles = ['mediterranean', 'cottage', 'desert', 'farmhouse', 'transitional'];
     for (const style of newStyles) {
       try {
-        await db.query(`ALTER TYPE design_style_enum ADD VALUE IF NOT EXISTS '${style}'`);
+        const safeStyle = style.replace(/[^a-z_]/g, '');
+        await db.query(`ALTER TYPE design_style_enum ADD VALUE IF NOT EXISTS '${safeStyle}'`);
       } catch (enumErr) {
         // enum value already exists or type doesn't exist — that's fine
       }
@@ -4612,8 +4659,14 @@ app.listen(config.port, async () => {
       ['description', 'TEXT'],
     ];
     for (const [col, type] of cols) {
-      try { await db.query(`ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch (e) { /* column exists */ }
+      try {
+        const safeName = col.replace(/[^a-z_]/g, '');
+        const safeType = type.replace(/[^A-Za-z0-9() ,]/g, '');
+        await db.query(`ALTER TABLE plant_library ADD COLUMN IF NOT EXISTS ${safeName} ${safeType}`);
+      } catch (e) { /* column exists */ }
     }
+    // Partial unique index for deduplication on import (only when container_size is set)
+    try { await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_plant_library_dedup ON plant_library (company_id, common_name, container_size) WHERE container_size IS NOT NULL`); } catch (e) { /* index exists or conflict */ }
     console.log('   plant_library table ready');
   } catch (e) {
     console.warn('   plant_library table check failed:', e.message);
@@ -4630,7 +4683,11 @@ app.listen(config.port, async () => {
       ['website', 'VARCHAR(255)'],
     ];
     for (const [col, type] of companyCols) {
-      try { await db.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch (e) { /* exists */ }
+      try {
+        const safeName = col.replace(/[^a-z_]/g, '');
+        const safeType = type.replace(/[^A-Za-z0-9() ,]/g, '');
+        await db.query(`ALTER TABLE companies ADD COLUMN IF NOT EXISTS ${safeName} ${safeType}`);
+      } catch (e) { /* exists */ }
     }
     console.log('   company submittal columns ready');
   } catch (e) {
@@ -4665,7 +4722,11 @@ app.listen(config.port, async () => {
       ['botanical_name', 'VARCHAR(255)'],
     ];
     for (const [col, type] of ppCols) {
-      try { await db.query(`ALTER TABLE submittal_plant_profiles ADD COLUMN IF NOT EXISTS ${col} ${type}`); } catch (e) { /* exists */ }
+      try {
+        const safeName = col.replace(/[^a-z_]/g, '');
+        const safeType = type.replace(/[^A-Za-z0-9() ,]/g, '');
+        await db.query(`ALTER TABLE submittal_plant_profiles ADD COLUMN IF NOT EXISTS ${safeName} ${safeType}`);
+      } catch (e) { /* exists */ }
     }
     console.log('   submittal_plant_profiles table ready');
   } catch (e) {
