@@ -337,6 +337,14 @@ const authLimiter = rateLimit({
   message: { error: 'Too many auth attempts. Please wait 15 minutes and try again.' },
 });
 
+const aiRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many AI requests, please wait a moment' },
+});
+
 // ─── Auth Middleware ──────────────────────────────────────────────
 
 // authenticateOnly — validates JWT only. No subscription check.
@@ -4264,14 +4272,6 @@ async function triggerCrmSync(companyId, entityType, entityId, action, data) {
 // AI PROXY ENDPOINTS (frontend calls these instead of OpenAI directly)
 // Keeps the API key server-side only — no VITE_OPENAI_API_KEY needed
 // ═══════════════════════════════════════════════════════════════════
-
-const aiRateLimit = rateLimit({
-  windowMs: 60 * 1000,
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many AI requests, please wait a moment' },
-});
 
 app.get('/api/ai/health', authenticate, (req, res) => {
   try {
