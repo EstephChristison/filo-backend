@@ -47,8 +47,9 @@ export default class StripeManager {
       });
     }
 
-    // Create base subscription price
-    const basePrice = await this.stripe.prices.create({
+    // Find or create base subscription price
+    const existingBasePrices = await this.stripe.prices.list({ product: product.id, lookup_keys: [PLAN_CONFIG.BASE_PRICE_LOOKUP], limit: 1 });
+    const basePrice = existingBasePrices.data[0] || await this.stripe.prices.create({
       product: product.id,
       unit_amount: PLAN_CONFIG.BASE_MONTHLY_PRICE,
       currency: PLAN_CONFIG.CURRENCY,
@@ -57,8 +58,9 @@ export default class StripeManager {
       metadata: { type: 'base_plan', included_users: String(PLAN_CONFIG.INCLUDED_USERS) },
     });
 
-    // Create per-user price
-    const userPrice = await this.stripe.prices.create({
+    // Find or create per-user price
+    const existingUserPrices = await this.stripe.prices.list({ product: product.id, lookup_keys: [PLAN_CONFIG.USER_PRICE_LOOKUP], limit: 1 });
+    const userPrice = existingUserPrices.data[0] || await this.stripe.prices.create({
       product: product.id,
       unit_amount: PLAN_CONFIG.ADDITIONAL_USER_PRICE,
       currency: PLAN_CONFIG.CURRENCY,
@@ -256,7 +258,7 @@ export default class StripeManager {
     await this.db.query(
       `UPDATE subscriptions SET cancel_at_period_end = $1, canceled_at = $2
        WHERE company_id = $3`,
-      [!cancelImmediately, cancelImmediately ? new Date() : null, companyId]
+      [!cancelImmediately, new Date(), companyId]
     );
 
     return {
@@ -275,8 +277,8 @@ export default class StripeManager {
     });
 
     await this.db.query(
-      `UPDATE subscriptions SET cancel_at_period_end = false, canceled_at = NULL, status = 'active'
-       WHERE company_id = $1`, [companyId]
+      `UPDATE subscriptions SET cancel_at_period_end = false, canceled_at = NULL, status = $1
+       WHERE company_id = $2`, [subscription.status === 'active' ? 'active' : subscription.status, companyId]
     );
 
     return { status: 'active', message: 'Subscription reactivated' };
@@ -284,6 +286,7 @@ export default class StripeManager {
 
   async pauseSubscription(companyId) {
     const company = await this.db.getOne('SELECT stripe_subscription_id FROM companies WHERE id = $1', [companyId]);
+    if (!company?.stripe_subscription_id) throw new Error('No active subscription');
     const subscription = await this.stripe.subscriptions.update(company.stripe_subscription_id, {
       pause_collection: { behavior: 'mark_uncollectible' },
     });
@@ -294,6 +297,7 @@ export default class StripeManager {
 
   async resumeSubscription(companyId) {
     const company = await this.db.getOne('SELECT stripe_subscription_id FROM companies WHERE id = $1', [companyId]);
+    if (!company?.stripe_subscription_id) throw new Error('No active subscription');
     const subscription = await this.stripe.subscriptions.update(company.stripe_subscription_id, {
       pause_collection: null,
     });
@@ -430,7 +434,7 @@ export default class StripeManager {
     await this.db.query(
       `INSERT INTO webhook_events (source, event_type, event_id, payload)
        VALUES ('stripe', $1, $2, $3) ON CONFLICT (source, event_id) DO NOTHING`,
-      [event.type, event.id, event.data]
+      [event.type, event.id, JSON.stringify(event.data)]
     );
 
     const handlers = {
@@ -466,12 +470,13 @@ export default class StripeManager {
     const userItem = sub.items?.data?.find(i => i.price?.lookup_key === PLAN_CONFIG.USER_PRICE_LOOKUP);
 
     await this.db.query(
-      `UPDATE subscriptions SET
-        status = $1, stripe_subscription_id = $2,
-        current_period_start = to_timestamp($3), current_period_end = to_timestamp($4),
-        cancel_at_period_end = $5, additional_users = $6,
-        trial_end = $7
-       WHERE company_id = $8`,
+      `INSERT INTO subscriptions (status, stripe_subscription_id, current_period_start, current_period_end, cancel_at_period_end, additional_users, trial_end, company_id)
+       VALUES ($1, $2, to_timestamp($3), to_timestamp($4), $5, $6, $7, $8)
+       ON CONFLICT (company_id) DO UPDATE SET
+        status = EXCLUDED.status, stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+        current_period_start = EXCLUDED.current_period_start, current_period_end = EXCLUDED.current_period_end,
+        cancel_at_period_end = EXCLUDED.cancel_at_period_end, additional_users = EXCLUDED.additional_users,
+        trial_end = EXCLUDED.trial_end`,
       [
         this.mapStatus(sub.status), sub.id,
         sub.current_period_start, sub.current_period_end,
@@ -586,7 +591,7 @@ export default class StripeManager {
       canceled: 'canceled', incomplete: 'past_due', incomplete_expired: 'locked',
       unpaid: 'locked', paused: 'paused',
     };
-    return map[stripeStatus] || 'active';
+    return map[stripeStatus] || 'locked'; // Fail safe — unknown status should restrict access, not grant it
   }
 }
 
@@ -611,7 +616,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
       const result = await stripeManager.createSubscription(req.user.companyId, paymentMethodId);
       res.json(result);
     } catch (err) {
-      res.status(400).json({ error: err.message });
+      console.error('[billing] error:', err.message); res.status(400).json({ error: 'Billing request failed' });
     }
   });
 
@@ -621,7 +626,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
       const { successUrl, cancelUrl } = req.body;
       const session = await stripeManager.createCheckoutSession(req.user.companyId, successUrl, cancelUrl);
       res.json(session);
-    } catch (err) { res.status(400).json({ error: err.message }); }
+    } catch (err) { console.error('[billing] error:', err.message); res.status(400).json({ error: 'Billing request failed' }); }
   });
 
   // Billing portal (manage payment methods, invoices)
@@ -630,7 +635,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
       const { returnUrl } = req.body;
       const session = await stripeManager.createBillingPortalSession(req.user.companyId, returnUrl);
       res.json(session);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { console.error('[billing] error:', err.message); res.status(500).json({ error: 'Billing operation failed' }); }
   });
 
   // Update payment method
@@ -639,7 +644,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
       const { paymentMethodId } = req.body;
       await stripeManager.updateCustomerPaymentMethod(req.user.companyId, paymentMethodId);
       res.json({ success: true });
-    } catch (err) { res.status(400).json({ error: err.message }); }
+    } catch (err) { console.error('[billing] error:', err.message); res.status(400).json({ error: 'Billing request failed' }); }
   });
 
   // Cancel subscription
@@ -648,7 +653,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
       const { immediate } = req.body;
       const result = await stripeManager.cancelSubscription(req.user.companyId, immediate);
       res.json(result);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { console.error('[billing] error:', err.message); res.status(500).json({ error: 'Billing operation failed' }); }
   });
 
   // Reactivate subscription
@@ -656,7 +661,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
     try {
       const result = await stripeManager.reactivateSubscription(req.user.companyId);
       res.json(result);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { console.error('[billing] error:', err.message); res.status(500).json({ error: 'Billing operation failed' }); }
   });
 
   // Pause subscription (admin/FILO staff only in practice)
@@ -664,7 +669,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
     try {
       const result = await stripeManager.pauseSubscription(req.user.companyId);
       res.json(result);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { console.error('[billing] error:', err.message); res.status(500).json({ error: 'Billing operation failed' }); }
   });
 
   // Resume subscription
@@ -672,7 +677,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
     try {
       const result = await stripeManager.resumeSubscription(req.user.companyId);
       res.json(result);
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    } catch (err) { console.error('[billing] error:', err.message); res.status(500).json({ error: 'Billing operation failed' }); }
   });
 
   // Get invoices
@@ -697,7 +702,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
       const result = await stripeManager.addUser(req.user.companyId);
       res.json(result);
     } catch (err) {
-      res.status(400).json({ error: err.message });
+      console.error('[billing] error:', err.message); res.status(400).json({ error: 'Billing request failed' });
     }
   });
 
@@ -707,7 +712,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
       const result = await stripeManager.removeUser(req.user.companyId);
       res.json(result);
     } catch (err) {
-      res.status(400).json({ error: err.message });
+      console.error('[billing] error:', err.message); res.status(400).json({ error: 'Billing request failed' });
     }
   });
 
@@ -718,7 +723,7 @@ export function mountStripeRoutes(app, stripeManager, authenticate, requireAdmin
       res.json(result);
     } catch (err) {
       console.error('Stripe webhook error:', err);
-      res.status(400).json({ error: err.message });
+      console.error('[billing] error:', err.message); res.status(400).json({ error: 'Billing request failed' });
     }
   });
 }

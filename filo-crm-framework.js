@@ -758,31 +758,38 @@ export function mountCRMRoutes(app, crmManager, authenticate, requireAdmin) {
   // Sync specific entity
   app.post('/api/crm/sync/client/:clientId', authenticate, async (req, res) => {
     try {
+      // Verify entity belongs to user's company before syncing
+      const client = await crmManager.db.getOne('SELECT id FROM clients WHERE id = $1 AND company_id = $2', [req.params.clientId, req.user.companyId]);
+      if (!client) return res.status(404).json({ error: 'Client not found' });
       const result = await crmManager.syncClient(req.user.companyId, req.params.clientId);
       res.json(result);
     } catch (err) {
       console.error('[crm/sync/client] Error:', err);
-      res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Internal error' : err.message });
+      res.status(500).json({ error: 'CRM sync failed' });
     }
   });
 
   app.post('/api/crm/sync/project/:projectId', authenticate, async (req, res) => {
     try {
+      const project = await crmManager.db.getOne('SELECT id FROM projects WHERE id = $1 AND company_id = $2', [req.params.projectId, req.user.companyId]);
+      if (!project) return res.status(404).json({ error: 'Project not found' });
       const result = await crmManager.syncProject(req.user.companyId, req.params.projectId);
       res.json(result);
     } catch (err) {
       console.error('[crm/sync/project] Error:', err);
-      res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Internal error' : err.message });
+      res.status(500).json({ error: 'CRM sync failed' });
     }
   });
 
   app.post('/api/crm/sync/estimate/:estimateId', authenticate, async (req, res) => {
     try {
+      const estimate = await crmManager.db.getOne('SELECT id FROM estimates WHERE id = $1 AND company_id = $2', [req.params.estimateId, req.user.companyId]);
+      if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
       const result = await crmManager.syncEstimate(req.user.companyId, req.params.estimateId);
       res.json(result);
     } catch (err) {
       console.error('[crm/sync/estimate] Error:', err);
-      res.status(500).json({ error: process.env.NODE_ENV === 'production' ? 'Internal error' : err.message });
+      res.status(500).json({ error: 'CRM sync failed' });
     }
   });
 

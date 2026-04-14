@@ -24,20 +24,28 @@ import { GoogleGenAI } from '@google/genai';
 import { createAIHandler } from './filo-ai-pipeline.js';
 import CRMManager, { mountCRMRoutes } from './filo-crm-framework.js';
 import { Resend } from 'resend';
-import StripeManager, { mountStripeRoutes } from './filo-stripe-module.js';
-import { createPDFEngine } from './filo-pdf-engine.js';
 
 // ─── Configuration ───────────────────────────────────────────────
 
 const config = {
   port: process.env.PORT || 4000,
   nodeEnv: process.env.NODE_ENV || 'development',
-  jwtSecret: process.env.JWT_SECRET || (() => {
-    console.warn('WARNING: JWT_SECRET not set — using insecure dev-only fallback. You MUST set JWT_SECRET in production!');
+  jwtSecret: (() => {
+    if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+    if (process.env.NODE_ENV === 'production') {
+      console.error('FATAL: JWT_SECRET must be set in production');
+      process.exit(1);
+    }
+    console.warn('WARNING: JWT_SECRET not set — using insecure dev-only fallback');
     return 'INSECURE_DEV_ONLY_jwt_access_secret_k7G4pXrM2vL9qW8nT3bY6dF1hJ5sA0cE_CHANGE_ME_IN_PROD';
   })(),
-  jwtRefreshSecret: process.env.JWT_REFRESH_SECRET || (() => {
-    console.warn('WARNING: JWT_REFRESH_SECRET not set — using insecure dev-only fallback. You MUST set JWT_REFRESH_SECRET in production!');
+  jwtRefreshSecret: (() => {
+    if (process.env.JWT_REFRESH_SECRET) return process.env.JWT_REFRESH_SECRET;
+    if (process.env.NODE_ENV === 'production') {
+      console.error('FATAL: JWT_REFRESH_SECRET must be set in production');
+      process.exit(1);
+    }
+    console.warn('WARNING: JWT_REFRESH_SECRET not set — using insecure dev-only fallback');
     return 'INSECURE_DEV_ONLY_jwt_refresh_secret_R8mN3wQ6xP1vK4tB7yH2jU9fL5gD0aS_CHANGE_ME_IN_PROD';
   })(),
   jwtExpiry: '2h',
@@ -185,6 +193,14 @@ const upload = multer({
 // Never leak internal error details (stack traces, DB info, API keys) to clients.
 function safeErrorMessage(_err) {
   return 'An internal error occurred. Please try again.';
+}
+
+
+// Safely extract content from OpenAI chat completion response.
+function aiContent(response) {
+  const content = response?.choices?.[0]?.message?.content;
+  if (!content) throw new Error('AI returned empty response');
+  return content;
 }
 
 // ─── Input Sanitization ──────────────────────────────────────────
@@ -636,6 +652,8 @@ app.post('/api/auth/invite', authenticateOnly, requireAdmin, async (req, res) =>
     const VALID_ROLES = ['admin', 'estimator'];
     const role = VALID_ROLES.includes(req.body.role) ? req.body.role : 'estimator';
     if (!email || !firstName || !lastName) return res.status(400).json({ error: 'email, firstName, and lastName are required' });
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!EMAIL_RE.test(email) || email.length > 254) return res.status(400).json({ error: 'Invalid email address' });
     const inviteToken = uuidv4();
     const tempPassword = await bcrypt.hash(uuidv4(), 12);
 
@@ -712,6 +730,8 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   try {
     const email = (req.body.email || '').trim().toLowerCase();
     if (!email) return res.status(400).json({ error: 'Email is required' });
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Invalid email address' });
 
     // Always return success to prevent email enumeration
     const user = await db.getOne('SELECT id, email FROM users WHERE email = $1', [email]);
@@ -730,7 +750,6 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
         <p><a href="${resetLink}">${resetLink}</a></p>
         <p>If you didn't request this, you can safely ignore this email.</p>
       `);
-      console.log(`[PASSWORD RESET] Reset requested for user ${user.id} (expires ${expires.toISOString()})`);
     }
     res.json({ message: 'If an account with that email exists, a reset link has been sent.' });
   } catch (err) {
@@ -783,7 +802,7 @@ app.post('/api/auth/forgot-email', authLimiter, async (req, res) => {
     const params = [];
     if (firstName) { params.push(firstName.toLowerCase()); query += ` AND LOWER(first_name) = $${params.length}`; }
     if (lastName) { params.push(lastName.toLowerCase()); query += ` AND LOWER(last_name) = $${params.length}`; }
-    if (phone) { params.push(phone.replace(/\D/g, '')); query += ` AND REPLACE(phone, '-', '') LIKE '%' || $${params.length} || '%'`; }
+    if (phone) { const cleanPhone = phone.replace(/\D/g, '').replace(/%/g, '').replace(/_/g, ''); params.push(cleanPhone); query += ` AND REPLACE(phone, '-', '') LIKE '%' || $${params.length} || '%'`; }
 
     const users = await db.getMany(query, params);
     if (users.length === 0) {
@@ -796,8 +815,8 @@ app.post('/api/auth/forgot-email', authLimiter, async (req, res) => {
       const maskedLocal = local.length <= 2
         ? local[0] + '***'
         : local[0] + '***' + local[local.length - 1];
-      const domParts = domain.split('.');
-      const maskedDomain = domParts[0][0] + '***' + '.' + domParts.slice(1).join('.');
+      const domParts = (domain || '').split('.');
+      const maskedDomain = (domParts[0]?.[0] || '*') + '***' + (domParts.length > 1 ? '.' + domParts.slice(1).join('.') : '');
       return maskedLocal + '@' + maskedDomain;
     });
 
@@ -912,7 +931,7 @@ app.get('/api/clients', authenticate, async (req, res) => {
   try {
     const { search } = req.query;
     const { page, limit, offset } = parsePagination(req.query);
-    let query = 'SELECT * FROM clients WHERE company_id = $1';
+    let query = 'SELECT id, company_id, display_name, first_name, last_name, company_name, email, phone, address_line1, city, state, zip, notes, created_at, updated_at FROM clients WHERE company_id = $1';
     const params = [req.user.companyId];
 
     if (search) {
@@ -1016,7 +1035,7 @@ app.put('/api/clients/:id', authenticate, async (req, res) => {
     const camelToSnake = {
       displayName: 'display_name', firstName: 'first_name', lastName: 'last_name',
       addressLine1: 'address_line1', addressLine2: 'address_line2',
-      companyName: 'company_name',
+      // companyName removed — column does not exist in schema
     };
     const fields = {};
     for (const [k, v] of Object.entries(raw)) {
@@ -1108,7 +1127,6 @@ app.post('/api/clients/import', authenticate, requireAdmin, upload.single('file'
     const fileName = sanitizeFilename(req.file.originalname);
     const mimeType = req.file.mimetype;
 
-    console.log(`[clients/import] Parsing "${fileName}" (${mimeType}, ${req.file.size} bytes) for company ${req.user.companyId}`);
 
     // ── Try 1: Direct CSV parse (no AI cost) ──
     let clientsList = [];
@@ -1123,11 +1141,9 @@ app.post('/api/clients/import', authenticate, requireAdmin, upload.single('file'
           if (mapped.length > 0) {
             clientsList = mapped;
             parseMethod = 'csv-direct';
-            console.log(`[clients/import] Direct CSV parse: ${mapped.length} clients`);
           }
         }
       } catch (csvErr) {
-        console.log(`[clients/import] Direct CSV parse failed: ${csvErr.message}, trying AI fallback`);
       }
     }
 
@@ -1167,7 +1183,7 @@ Be thorough. Real client lists have inconsistent formatting, missing fields, and
         temperature: 0.1,
       });
 
-      const parsed = JSON.parse(aiResponse.choices[0].message.content);
+      const parsed = JSON.parse(aiContent(aiResponse));
       clientsList = parsed.clients || [];
       parseMethod = 'ai';
     }
@@ -1183,17 +1199,20 @@ Be thorough. Real client lists have inconsistent formatting, missing fields, and
 
     let imported = 0;
     const errors = [];
+
+    // Prepare all client rows, then bulk INSERT in batches of 100
+    const preparedClients = [];
     for (const c of clientsList) {
       try {
         const firstName = c.first_name ? stripHtml(c.first_name.trim()) : null;
         const lastName = c.last_name ? stripHtml(c.last_name.trim()) : null;
         const companyName = c.company_name ? stripHtml(c.company_name.trim()) : null;
         const email = c.email ? c.email.trim().toLowerCase() : null;
-        const phone = c.phone || null;
+        const phone = c.phone ? stripHtml(c.phone.trim()) : null;
         const addressLine1 = c.address_line1 ? stripHtml(c.address_line1) : null;
         const city = c.city ? stripHtml(c.city) : null;
         const state = c.state ? stripHtml(c.state) : null;
-        const zip = c.zip || null;
+        const zip = c.zip ? stripHtml(c.zip.trim()) : null;
         const notes = c.notes ? stripHtml(c.notes) : null;
 
         let displayName;
@@ -1204,18 +1223,48 @@ Be thorough. Real client lists have inconsistent formatting, missing fields, and
         else if (email) displayName = email;
         else displayName = 'Unnamed Client';
 
-        await db.getOne(
-          `INSERT INTO clients (company_id, display_name, first_name, last_name, email, phone, address_line1, city, state, zip, notes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
-          [req.user.companyId, displayName, firstName, lastName, email, phone, addressLine1, city, state, zip, notes]
-        );
-        imported++;
-      } catch (insertErr) {
-        errors.push(`${c.first_name || c.last_name || 'Unknown'}: ${insertErr.message}`);
+        preparedClients.push([req.user.companyId, displayName, firstName, lastName, email, phone, addressLine1, city, state, zip, notes]);
+      } catch (prepErr) {
+        errors.push(`${c.first_name || c.last_name || 'Unknown'}: ${prepErr.message}`);
       }
     }
 
-    console.log(`[clients/import] Imported ${imported}/${clientsList.length} clients for company ${req.user.companyId}`);
+    // Bulk INSERT in batches of 100 rows
+    const BATCH_SIZE = 100;
+    for (let batchStart = 0; batchStart < preparedClients.length; batchStart += BATCH_SIZE) {
+      const batch = preparedClients.slice(batchStart, batchStart + BATCH_SIZE);
+      const valueClauses = [];
+      const params = [];
+      let idx = 1;
+      for (const row of batch) {
+        valueClauses.push(`($${idx}, $${idx+1}, $${idx+2}, $${idx+3}, $${idx+4}, $${idx+5}, $${idx+6}, $${idx+7}, $${idx+8}, $${idx+9}, $${idx+10})`);
+        params.push(...row);
+        idx += 11;
+      }
+      try {
+        const result = await db.query(
+          `INSERT INTO clients (company_id, display_name, first_name, last_name, email, phone, address_line1, city, state, zip, notes)
+           VALUES ${valueClauses.join(', ')} RETURNING id`,
+          params
+        );
+        imported += result.rows.length;
+      } catch (batchErr) {
+        // Fall back to individual inserts for this batch so partial errors don't lose all rows
+        for (const row of batch) {
+          try {
+            await db.getOne(
+              `INSERT INTO clients (company_id, display_name, first_name, last_name, email, phone, address_line1, city, state, zip, notes)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+              row
+            );
+            imported++;
+          } catch (insertErr) {
+            errors.push(`${row[2] || row[3] || 'Unknown'}: ${insertErr.message}`);
+          }
+        }
+      }
+    }
+
 
     await logActivity(req.user.companyId, req.user.userId, 'client', null, 'import', `Imported ${imported} clients from ${fileName}`);
 
@@ -1240,7 +1289,7 @@ app.get('/api/projects', authenticate, async (req, res) => {
   try {
     const { status, clientId } = req.query;
     const { page, limit, offset } = parsePagination(req.query);
-    let query = 'SELECT * FROM v_active_projects WHERE company_id = $1';
+    let query = 'SELECT id, company_id, client_id, name, status, address, sun_exposure, design_style, special_requests, lighting_requested, estimated_total, created_at, updated_at FROM v_active_projects WHERE company_id = $1';
     const params = [req.user.companyId];
 
     if (status) { params.push(status); query += ` AND status = $${params.length}`; }
@@ -1308,14 +1357,21 @@ app.post('/api/projects', authenticate, async (req, res) => {
           'side_yard_right': 'side_yard_right', 'side yard right': 'side_yard_right',
           'left': 'side_yard_left', 'right': 'side_yard_right',
         };
+        // Bulk INSERT all areas in one query
+        const areaValues = [];
+        const areaParams = [];
+        let areaIdx = 1;
         for (let i = 0; i < areas.length; i++) {
           const rawAreaType = (areas[i].area_type || areas[i].type || 'custom').toLowerCase().trim();
           const mappedAreaType = AREA_TYPE_MAP[rawAreaType] || 'custom';
-          await client.query(
-            `INSERT INTO property_areas (project_id, area_type, custom_name, sort_order) VALUES ($1, $2, $3, $4)`,
-            [proj.rows[0].id, mappedAreaType, areas[i].name, i]
-          );
+          areaValues.push(`($${areaIdx}, $${areaIdx + 1}, $${areaIdx + 2}, $${areaIdx + 3})`);
+          areaParams.push(proj.rows[0].id, mappedAreaType, areas[i].name, i);
+          areaIdx += 4;
         }
+        await client.query(
+          `INSERT INTO property_areas (project_id, area_type, custom_name, sort_order) VALUES ${areaValues.join(', ')}`,
+          areaParams
+        );
       }
 
       return proj.rows[0];
@@ -1337,10 +1393,10 @@ app.get('/api/projects/:id', authenticate, async (req, res) => {
     );
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
-    const areas = await db.getMany('SELECT * FROM property_areas WHERE project_id = $1 ORDER BY sort_order', [project.id]);
-    const designs = await db.getMany('SELECT * FROM designs WHERE project_id = $1 AND is_current = true', [project.id]);
-    const estimates = await db.getMany('SELECT * FROM estimates WHERE project_id = $1 AND is_current = true', [project.id]);
-    const revisions = await db.getMany('SELECT * FROM revisions WHERE project_id = $1 ORDER BY created_at DESC LIMIT 20', [project.id]);
+    const areas = await db.getMany('SELECT id, project_id, area_type, custom_name, sort_order, created_at FROM property_areas WHERE project_id = $1 ORDER BY sort_order LIMIT 100', [project.id]);
+    const designs = await db.getMany('SELECT id, project_id, property_area_id, is_current, generation_status, design_data, ai_prompt, created_at, updated_at FROM designs WHERE project_id = $1 AND is_current = true LIMIT 50', [project.id]);
+    const estimates = await db.getMany('SELECT id, project_id, company_id, is_current, status, subtotal, tax_amount, tax_rate, tax_enabled, total, notes, terms, warranty, valid_until, labor_method, material_markup, created_at, updated_at FROM estimates WHERE project_id = $1 AND is_current = true LIMIT 50', [project.id]);
+    const revisions = await db.getMany('SELECT id, project_id, design_id, version, revision_type, description, changes_json, created_at FROM revisions WHERE project_id = $1 ORDER BY created_at DESC LIMIT 20', [project.id]);
 
     res.json({ ...project, areas, designs, estimates, revisions });
   } catch (err) {
@@ -1430,7 +1486,7 @@ app.get('/api/projects/:projectId/areas', authenticate, async (req, res) => {
     const project = await db.getOne('SELECT id FROM projects WHERE id = $1 AND company_id = $2', [req.params.projectId, req.user.companyId]);
     if (!project) return res.status(404).json({ error: 'Project not found' });
     const areas = await db.getMany(
-      'SELECT * FROM property_areas WHERE project_id = $1 ORDER BY sort_order',
+      'SELECT id, project_id, area_type, custom_name, sort_order, created_at FROM property_areas WHERE project_id = $1 ORDER BY sort_order LIMIT 100',
       [req.params.projectId]
     );
     res.json(areas);
@@ -1483,7 +1539,7 @@ app.get('/api/areas/:areaId/existing-plants', authenticate, async (req, res) => 
     );
     if (!area) return res.status(404).json({ error: 'Area not found' });
     const plants = await db.getMany(
-      'SELECT * FROM existing_plants WHERE property_area_id = $1 ORDER BY position_x',
+      'SELECT id, property_area_id, identified_name, common_name, botanical_name, mark, comment, position_x, position_y, created_at FROM existing_plants WHERE property_area_id = $1 ORDER BY position_x LIMIT 500',
       [req.params.areaId]
     );
     res.json(plants);
@@ -1593,7 +1649,6 @@ app.post('/api/removal-preview', authenticate, aiRateLimit, async (req, res) => 
     const ssrfError = validateUrlForSSRF(photoUrl);
     if (ssrfError) return res.status(400).json({ error: ssrfError });
 
-    console.log('[removal-preview] Downloading original photo...');
     let photoBuffer;
     if (photoUrl.startsWith('data:')) {
       const b64 = photoUrl.replace(/^data:image\/[^;]+;base64,/, '');
@@ -1608,7 +1663,6 @@ app.post('/api/removal-preview', authenticate, aiRateLimit, async (req, res) => 
     const origW = metadata.width;
     const origH = metadata.height;
 
-    console.log('[removal-preview] Photo dimensions: %dx%d', origW, origH);
 
     // Resize photo — use fit:contain so output is always exactly 1024x1024
     // This matches the mask which is always drawn on a 1024x1024 canvas
@@ -1623,7 +1677,6 @@ app.post('/api/removal-preview', authenticate, aiRateLimit, async (req, res) => 
     const rpScaledH = Math.round(origH * rpScale);
     const rpOffsetX = Math.round((1024 - rpScaledW) / 2);
     const rpOffsetY = Math.round((1024 - rpScaledH) / 2);
-    console.log('[removal-preview] Letterbox: photo %dx%d → %dx%d, offset (%d, %d)', origW, origH, rpScaledW, rpScaledH, rpOffsetX, rpOffsetY);
 
     const maskB64 = maskDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
     const rawMask = Buffer.from(maskB64, 'base64');
@@ -1639,7 +1692,6 @@ app.post('/api/removal-preview', authenticate, aiRateLimit, async (req, res) => 
       .png()
       .toBuffer();
 
-    console.log('[removal-preview] Mask aligned to letterbox: %dKB, placed %dx%d at (%d,%d)', Math.round(maskResized.length / 1024), rpScaledW, rpScaledH, rpOffsetX, rpOffsetY);
 
     const response = await googleAI.models.generateContent({
       model: 'gemini-2.5-flash-image',
@@ -1673,7 +1725,6 @@ app.post('/api/removal-preview', authenticate, aiRateLimit, async (req, res) => 
     }
 
     const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
-    console.log('[removal-preview] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
     // Extract the photo region from the 1024x1024 contain result (remove letterbox padding)
     // Reuse rpScale/rpScaledW/rpScaledH/rpOffsetX/rpOffsetY from above
@@ -1685,7 +1736,6 @@ app.post('/api/removal-preview', authenticate, aiRateLimit, async (req, res) => 
       .toBuffer();
 
     const resultDataUrl = `data:image/jpeg;base64,${croppedBuffer.toString('base64')}`;
-    console.log('[removal-preview] Complete:', Math.round(croppedBuffer.length / 1024), 'KB');
     res.json({ previewUrl: resultDataUrl });
   } catch (err) {
     console.error('[removal-preview] Error:', err.message);
@@ -1705,7 +1755,6 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
     if (ssrfErrBed) return res.status(400).json({ error: ssrfErrBed });
 
     const hasMask = maskDataUrl && maskDataUrl.startsWith('data:');
-    console.log('[bed-edge] Downloading photo... hasMask:', hasMask);
     let photoBuffer;
     if (photoUrl.startsWith('data:')) {
       const b64 = photoUrl.replace(/^data:image\/[^;]+;base64,/, '');
@@ -1719,7 +1768,6 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
     const metadata = await sharp(photoBuffer).metadata();
     const origW = metadata.width;
     const origH = metadata.height;
-    console.log('[bed-edge] Photo: %dx%d, style: %s, adjustment: %d ft', origW, origH, edgeStyle, adjustmentFeet || 0);
 
     const resizedBuffer = await sharp(photoBuffer)
       .resize(1024, 1024, { fit: 'contain', background: { r: 0, g: 0, b: 0 } })
@@ -1732,7 +1780,6 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
     const scaledH = Math.round(origH * scale);
     const offsetX = Math.round((1024 - scaledW) / 2);
     const offsetY = Math.round((1024 - scaledH) / 2);
-    console.log('[bed-edge] Letterbox: photo %dx%d → %dx%d, offset (%d, %d)', origW, origH, scaledW, scaledH, offsetX, offsetY);
 
     let maskResized = null;
     let annotatedPhoto = null;
@@ -1753,7 +1800,6 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
         .composite([{ input: maskScaled, left: offsetX, top: offsetY }])
         .png()
         .toBuffer();
-      console.log('[bed-edge] Mask aligned to letterbox: placed %dx%d at (%d,%d)', scaledW, scaledH, offsetX, offsetY);
 
       // Create an annotated photo with the mask boundary drawn as a bright overlay
       // This helps Gemini visually see exactly where the new bed edge should be
@@ -1786,7 +1832,6 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
         .composite([{ input: overlayBuffer, blend: 'over' }])
         .jpeg({ quality: 85 })
         .toBuffer();
-      console.log('[bed-edge] Created annotated photo with mask overlay: %dKB', Math.round(annotatedPhoto.length / 1024));
     }
 
     const edgeDesc = edgeStyle === 'square'
@@ -1837,7 +1882,6 @@ BED EDGE RULES:
 7. The result must look like a real photograph with natural lighting and shadows.` });
 
 
-    console.log('[bed-edge] Calling Gemini...');
     let response;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
@@ -1852,7 +1896,6 @@ BED EDGE RULES:
       } catch (geminiErr) {
         console.warn(`[bed-edge] Gemini attempt ${attempt} failed:`, geminiErr.message);
         if (attempt === 2) throw geminiErr;
-        console.log('[bed-edge] Retrying in 2s...');
         await new Promise(r => setTimeout(r, 2000));
       }
     }
@@ -1865,7 +1908,6 @@ BED EDGE RULES:
     }
 
     const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
-    console.log('[bed-edge] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
     // Reuse scale/scaledW/scaledH/offsetX/offsetY from letterbox calc above
     const resultMeta = await sharp(resultBuffer).metadata();
@@ -1876,7 +1918,6 @@ BED EDGE RULES:
       .toBuffer();
 
     const resultDataUrl = `data:image/jpeg;base64,${croppedBuffer.toString('base64')}`;
-    console.log('[bed-edge] Complete:', Math.round(croppedBuffer.length / 1024), 'KB');
     res.json({ previewUrl: resultDataUrl });
   } catch (err) {
     console.error('[bed-edge] Error:', err.message);
@@ -1896,7 +1937,6 @@ app.post('/api/design-render', authenticate, aiRateLimit, async (req, res) => {
     if (ssrfErrRender) return res.status(400).json({ error: ssrfErrRender });
 
     const isRemovalPreview = photoUrl.startsWith('data:');
-    console.log('[design-render] Photo source: %s (%s)', isRemovalPreview ? 'REMOVAL PREVIEW (data URL)' : 'ORIGINAL PHOTO (URL)', isRemovalPreview ? Math.round(photoUrl.length / 1024) + 'KB base64' : photoUrl.substring(0, 80));
     let photoBuffer;
     if (isRemovalPreview) {
       const b64 = photoUrl.replace(/^data:image\/[^;]+;base64,/, '');
@@ -1942,8 +1982,6 @@ app.post('/api/design-render', authenticate, aiRateLimit, async (req, res) => {
     const totalPlantCount = Object.values(speciesCounts).reduce((s, n) => s + n, 0);
     const speciesCountList = Object.entries(speciesCounts).map(([name, qty]) => `  - ${name}: EXACTLY ${qty}`).join('\n');
 
-    console.log('[design-render] Plant description:', plantDesc);
-    console.log('[design-render] Total plants:', totalPlantCount, '| Species counts:', JSON.stringify(speciesCounts));
 
     // Build kept plants description for prompt
     const keptPlantsDesc = (keptPlants && keptPlants.length > 0)
@@ -1994,7 +2032,6 @@ ${removedPlantsDesc ? `3. Do NOT add back any ${removedPlantsDesc}. Those were r
 8. Result must look like a real photograph — natural lighting, real textures, correct shadows.
 9. QUANTITY CHECK: Before finalizing, verify you placed exactly ${totalPlantCount} total plants. Each species count must match the list above.`;
 
-    console.log('[design-render] Calling Gemini gemini-2.5-flash-image...');
     const resizedBuffer = await sharp(photoBuffer)
       .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 85 })
@@ -2024,7 +2061,6 @@ ${removedPlantsDesc ? `3. Do NOT add back any ${removedPlantsDesc}. Those were r
     }
 
     const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
-    console.log('[design-render] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
     const finalBuffer = await sharp(resultBuffer)
       .resize(origW, origH, { fit: 'fill' })
@@ -2032,7 +2068,6 @@ ${removedPlantsDesc ? `3. Do NOT add back any ${removedPlantsDesc}. Those were r
       .toBuffer();
 
     const renderDataUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
-    console.log('[design-render] Final design complete:', Math.round(finalBuffer.length / 1024), 'KB');
     res.json({ renderUrl: renderDataUrl, prompt: plantDesc });
   } catch (err) {
     console.error('[design-render] Error:', err.message);
@@ -2060,7 +2095,6 @@ app.post('/api/design-adjust', authenticate, aiRateLimit, async (req, res) => {
     const pctR = Math.max(3, Math.min(50, parseFloat(radius) || 10));
     const isGlobalRevision = pctR >= 45; // Full-image revision (color swap, plant swap, etc.)
 
-    console.log('[design-adjust] Pin at (%d%, %d%) radius %d%, prompt: %s', pctX, pctY, pctR, safePrompt);
 
     // Decode the rendered image
     let imgBuffer;
@@ -2126,7 +2160,6 @@ STRICT RULES:
 4. If adding plants, render them in FULL BLOOM with flowers showing at peak season.
 5. This must look like a real photograph, not illustrated or AI-generated.`;
 
-    console.log(`[design-adjust] Calling Gemini gemini-2.5-flash-image... (${isGlobalRevision ? 'GLOBAL revision' : 'local pin adjustment'})`);
 
     // For global revisions, skip the mask — send just the image and prompt
     const geminiParts = isGlobalRevision
@@ -2156,7 +2189,6 @@ STRICT RULES:
     }
 
     const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
-    console.log('[design-adjust] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
     // Upscale back to original dimensions
     const finalBuffer = await sharp(resultBuffer)
@@ -2165,7 +2197,6 @@ STRICT RULES:
       .toBuffer();
 
     const resultDataUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
-    console.log('[design-adjust] Adjustment complete:', Math.round(finalBuffer.length / 1024), 'KB');
     res.json({ renderUrl: resultDataUrl });
   } catch (err) {
     console.error('[design-adjust] Error:', err.message);
@@ -2182,7 +2213,6 @@ app.post('/api/design-night-mode', authenticate, aiRateLimit, async (req, res) =
     if (ssrfErr2) return res.status(400).json({ error: ssrfErr2 });
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
 
-    console.log('[night-mode] Converting design to nighttime with landscape lighting...');
 
     let imgBuffer;
     if (renderDataUrl.startsWith('data:')) {
@@ -2258,7 +2288,6 @@ The result must look like a professional landscape lighting design photograph ta
     }
 
     const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
-    console.log('[night-mode] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
     const finalBuffer = await sharp(resultBuffer)
       .resize(origW, origH, { fit: 'fill' })
@@ -2266,7 +2295,6 @@ The result must look like a professional landscape lighting design photograph ta
       .toBuffer();
 
     const resultDataUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
-    console.log('[night-mode] Complete:', Math.round(finalBuffer.length / 1024), 'KB');
     res.json({ renderUrl: resultDataUrl });
   } catch (err) {
     console.error('[night-mode] Error:', err.message);
@@ -2286,7 +2314,6 @@ app.post('/api/design-hardscape', authenticate, aiRateLimit, async (req, res) =>
     if (!googleAI) return res.status(503).json({ error: 'Google AI not configured — set GOOGLE_AI_API_KEY' });
 
     const safePrompt = stripHtml(prompt.trim());
-    console.log('[hardscape] Applying hardscape: "%s"', safePrompt);
 
     let imgBuffer;
     if (renderDataUrl.startsWith('data:')) {
@@ -2367,7 +2394,6 @@ CRITICAL — CLEAN SURFACE RULE:
     }
 
     const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
-    console.log('[hardscape] Gemini returned image:', Math.round(resultBuffer.length / 1024), 'KB');
 
     const finalBuffer = await sharp(resultBuffer)
       .resize(origW, origH, { fit: 'fill' })
@@ -2375,7 +2401,6 @@ CRITICAL — CLEAN SURFACE RULE:
       .toBuffer();
 
     const resultDataUrl = `data:image/jpeg;base64,${finalBuffer.toString('base64')}`;
-    console.log('[hardscape] Complete:', Math.round(finalBuffer.length / 1024), 'KB');
     res.json({ renderUrl: resultDataUrl });
   } catch (err) {
     console.error('[hardscape] Error:', err.message);
@@ -2387,7 +2412,7 @@ CRITICAL — CLEAN SURFACE RULE:
 app.get('/api/saved-prompts', authenticate, async (req, res) => {
   try {
     const prompts = await db.getMany(
-      'SELECT * FROM saved_prompts WHERE company_id = $1 ORDER BY created_at DESC',
+      'SELECT id, company_id, user_id, name, prompt, created_at FROM saved_prompts WHERE company_id = $1 ORDER BY created_at DESC LIMIT 100',
       [req.user.companyId]
     );
     res.json({ prompts });
@@ -2477,7 +2502,6 @@ app.post('/api/upload/photos/:areaId', authenticate, upload.array('photos', 20),
       return res.status(404).json({ error: `Property area ${req.params.areaId} not found` });
     }
 
-    console.log(`[photos] Uploading ${req.files.length} photos for area ${req.params.areaId}`);
 
     const photos = [];
     for (const file of req.files) {
@@ -2505,7 +2529,6 @@ app.post('/api/upload/photos/:areaId', authenticate, upload.array('photos', 20),
       try {
         const imageUrls = photos.map(p => p.file.cdn_url).filter(Boolean);
         if (imageUrls.length > 0) {
-          console.log(`[plant-detection] Analyzing ${imageUrls.length} photo(s) for area ${req.params.areaId}`);
           const messages = [
             {
               role: 'system',
@@ -2540,24 +2563,47 @@ Be thorough but realistic. Only identify plants you can see clearly.`
             temperature: 0.2,
           });
 
-          const detected = JSON.parse(aiRes.choices[0].message.content);
+          const detected = JSON.parse(aiContent(aiRes));
           const plantsList = detected.plants || [];
 
-          for (const p of plantsList) {
-            try {
+          // Bulk INSERT all detected plants in one query
+          if (plantsList.length > 0) {
+            const epValues = [];
+            const epParams = [];
+            let epIdx = 1;
+            for (const p of plantsList) {
               const name = [p.common_name, p.botanical_name].filter(Boolean).join(' — ');
-              await db.getOne(
-                `INSERT INTO existing_plants (property_area_id, identified_name, confidence, position_x, position_y, mark, comment)
-                 VALUES ($1, $2, $3, $4, $5, 'keep', $6) RETURNING id`,
-                [req.params.areaId, name || 'Unknown Plant', p.confidence || 0.5,
-                 p.position_x || 0.5, p.position_y || 0.5,
-                 [p.category, p.condition, p.notes].filter(Boolean).join('; ') || null]
+              epValues.push(`($${epIdx}, $${epIdx+1}, $${epIdx+2}, $${epIdx+3}, $${epIdx+4}, 'keep', $${epIdx+5})`);
+              epParams.push(
+                req.params.areaId, name || 'Unknown Plant', p.confidence || 0.5,
+                p.position_x || 0.5, p.position_y || 0.5,
+                [p.category, p.condition, p.notes].filter(Boolean).join('; ') || null
               );
-            } catch (insertErr) {
-              console.log(`[plant-detection] Could not insert plant "${p.common_name}":`, insertErr.message);
+              epIdx += 6;
+            }
+            try {
+              await db.query(
+                `INSERT INTO existing_plants (property_area_id, identified_name, confidence, position_x, position_y, mark, comment)
+                 VALUES ${epValues.join(', ')}`,
+                epParams
+              );
+            } catch (bulkErr) {
+              // Fall back to individual inserts if bulk fails
+              for (const p of plantsList) {
+                try {
+                  const name = [p.common_name, p.botanical_name].filter(Boolean).join(' — ');
+                  await db.getOne(
+                    `INSERT INTO existing_plants (property_area_id, identified_name, confidence, position_x, position_y, mark, comment)
+                     VALUES ($1, $2, $3, $4, $5, 'keep', $6) RETURNING id`,
+                    [req.params.areaId, name || 'Unknown Plant', p.confidence || 0.5,
+                     p.position_x || 0.5, p.position_y || 0.5,
+                     [p.category, p.condition, p.notes].filter(Boolean).join('; ') || null]
+                  );
+                } catch (insertErr) {
+                }
+              }
             }
           }
-          console.log(`[plant-detection] Detected ${plantsList.length} plants for area ${req.params.areaId}`);
         }
       } catch (aiErr) {
         console.error('[plant-detection] AI error (non-blocking):', aiErr.message);
@@ -2605,7 +2651,7 @@ app.get('/api/plants', authenticate, async (req, res) => {
   try {
     const { search, category, sun } = req.query;
     const { page, limit, offset } = parsePagination(req.query);
-    let query = 'SELECT * FROM plant_library WHERE company_id = $1';
+    let query = 'SELECT id, company_id, common_name, botanical_name, category, container_size, mature_height, mature_width, sun_requirement, water_needs, bloom_color, bloom_season, foliage_color, image_url, description, retail_price, wholesale_price, tags, is_native, is_available, sort_order, created_at, updated_at FROM plant_library WHERE company_id = $1';
     const params = [req.user.companyId];
 
     if (search) { params.push(`%${search}%`); query += ` AND (common_name ILIKE $${params.length} OR botanical_name ILIKE $${params.length})`; }
@@ -2647,7 +2693,6 @@ app.delete('/api/plants/all', authenticate, requireAdmin, async (req, res) => {
       'DELETE FROM plant_library WHERE company_id = $1',
       [req.user.companyId]
     );
-    console.log(`[plants] Deleted all ${result.rowCount} plants for company ${req.user.companyId}`);
     res.json({ message: `Deleted ${result.rowCount} products`, deleted: result.rowCount });
   } catch (err) {
     console.error('DELETE /api/plants/all error:', err.message);
@@ -2851,7 +2896,6 @@ app.post('/api/plants/import', authenticate, requireAdmin, upload.single('file')
     const isBinary = /\.(xlsx|xls|pdf)$/i.test(fileName) || mimeType.includes('spreadsheet') || mimeType.includes('excel') || mimeType === 'application/pdf';
     const fileContent = isBinary ? null : req.file.buffer.toString('utf-8');
 
-    console.log(`[plants/import] Parsing "${fileName}" (${mimeType}, ${req.file.size} bytes) for company ${req.user.companyId}`);
 
     let plantsList = [];
     let warnings = [];
@@ -2863,14 +2907,12 @@ app.post('/api/plants/import', authenticate, requireAdmin, upload.single('file')
       try {
         const csvData = parseCSV(fileContent);
         if (csvData && csvData.rows.length > 0) {
-          console.log(`[plants/import] CSV detected: ${csvData.rows.length} rows, headers: [${csvData.headers.join(', ')}]`);
           for (const row of csvData.rows) {
             const plant = mapCSVToPlant(row, csvData.headers);
             if (plant) plantsList.push(plant);
           }
           if (plantsList.length > 0) {
             parseMethod = 'csv-direct';
-            console.log(`[plants/import] Direct CSV parse: ${plantsList.length} plants extracted`);
           } else {
             warnings.push('CSV parsed but no plant names found in columns — falling back to AI parsing');
           }
@@ -2937,7 +2979,7 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
           temperature: 0.1,
         });
 
-        const parsed = JSON.parse(aiResponse.choices[0].message.content);
+        const parsed = JSON.parse(aiContent(aiResponse));
         plantsList = parsed.plants || [];
         warnings = [...warnings, ...(parsed.warnings || [])];
         parseMethod = 'ai';
@@ -2948,16 +2990,43 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
       return res.json({ message: 'No products found in file', imported: 0, warnings });
     }
 
-    // Insert each parsed plant into the plant_library
+    // Bulk INSERT plants into plant_library in batches of 50 (ON CONFLICT upsert)
     let imported = 0;
     const errors = [];
+    const validPlants = [];
     for (const p of plantsList) {
+      const safeName = stripHtml(p.common_name || '');
+      if (!safeName) { errors.push('Skipped row with empty name'); continue; }
+      validPlants.push({
+        safeName,
+        botanical_name: p.botanical_name ? stripHtml(p.botanical_name) : null,
+        category: p.category || null,
+        container_size: p.container_size ? stripHtml(p.container_size) : null,
+        sun_requirement: p.sun_requirement || null,
+        water_needs: p.water_needs || null,
+        wholesale_price: p.wholesale_price ?? null,
+        retail_price: p.retail_price ?? null,
+        is_native: p.is_native || false,
+        notes: p.notes ? stripHtml(p.notes) : null,
+        original_name: p.common_name,
+      });
+    }
+
+    const PLANT_BATCH = 50;
+    for (let batchStart = 0; batchStart < validPlants.length; batchStart += PLANT_BATCH) {
+      const batch = validPlants.slice(batchStart, batchStart + PLANT_BATCH);
+      const valueClauses = [];
+      const params = [];
+      let idx = 1;
+      for (const p of batch) {
+        valueClauses.push(`($${idx}, $${idx+1}, $${idx+2}, $${idx+3}, $${idx+4}, $${idx+5}, $${idx+6}, $${idx+7}, $${idx+8}, $${idx+9}, $${idx+10}, true)`);
+        params.push(req.user.companyId, p.safeName, p.botanical_name, p.category, p.container_size, p.sun_requirement, p.water_needs, p.wholesale_price, p.retail_price, p.is_native, p.notes);
+        idx += 11;
+      }
       try {
-        const safeName = stripHtml(p.common_name || '');
-        if (!safeName) { errors.push('Skipped row with empty name'); continue; }
-        await db.getOne(
+        const result = await db.query(
           `INSERT INTO plant_library (company_id, common_name, botanical_name, category, container_size, sun_requirement, water_needs, wholesale_price, retail_price, is_native, description, is_available)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)
+           VALUES ${valueClauses.join(', ')}
            ON CONFLICT (company_id, common_name, container_size) WHERE container_size IS NOT NULL
            DO UPDATE SET botanical_name = COALESCE(EXCLUDED.botanical_name, plant_library.botanical_name),
              category = COALESCE(EXCLUDED.category, plant_library.category),
@@ -2967,27 +3036,35 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
              water_needs = COALESCE(EXCLUDED.water_needs, plant_library.water_needs),
              updated_at = NOW()
            RETURNING id`,
-          [
-            req.user.companyId,
-            safeName,
-            p.botanical_name ? stripHtml(p.botanical_name) : null,
-            p.category || null,
-            p.container_size ? stripHtml(p.container_size) : null,
-            p.sun_requirement || null,
-            p.water_needs || null,
-            p.wholesale_price ?? null,
-            p.retail_price ?? null,
-            p.is_native || false,
-            p.notes ? stripHtml(p.notes) : null,
-          ]
+          params
         );
-        imported++;
-      } catch (insertErr) {
-        errors.push(`${p.common_name}: ${insertErr.message}`);
+        imported += result.rows.length;
+      } catch (batchErr) {
+        // Fall back to individual inserts for this batch
+        for (const p of batch) {
+          try {
+            await db.getOne(
+              `INSERT INTO plant_library (company_id, common_name, botanical_name, category, container_size, sun_requirement, water_needs, wholesale_price, retail_price, is_native, description, is_available)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)
+               ON CONFLICT (company_id, common_name, container_size) WHERE container_size IS NOT NULL
+               DO UPDATE SET botanical_name = COALESCE(EXCLUDED.botanical_name, plant_library.botanical_name),
+                 category = COALESCE(EXCLUDED.category, plant_library.category),
+                 wholesale_price = COALESCE(EXCLUDED.wholesale_price, plant_library.wholesale_price),
+                 retail_price = COALESCE(EXCLUDED.retail_price, plant_library.retail_price),
+                 sun_requirement = COALESCE(EXCLUDED.sun_requirement, plant_library.sun_requirement),
+                 water_needs = COALESCE(EXCLUDED.water_needs, plant_library.water_needs),
+                 updated_at = NOW()
+               RETURNING id`,
+              [req.user.companyId, p.safeName, p.botanical_name, p.category, p.container_size, p.sun_requirement, p.water_needs, p.wholesale_price, p.retail_price, p.is_native, p.notes]
+            );
+            imported++;
+          } catch (insertErr) {
+            errors.push(`${p.original_name}: ${insertErr.message}`);
+          }
+        }
       }
     }
 
-    console.log(`[plants/import] Imported ${imported}/${plantsList.length} plants via ${parseMethod} for company ${req.user.companyId}`);
 
     await logActivity(req.user.companyId, req.user.userId, 'plant_library', null, 'import', `Imported ${imported} plants from ${fileName} (${parseMethod})`);
 
@@ -3008,25 +3085,41 @@ Be thorough. Real nursery lists have inconsistent formatting, abbreviations, and
 // DESIGN / AI ROUTES
 // ═══════════════════════════════════════════════════════════════════
 
-app.post('/api/projects/:projectId/designs/generate', authenticate, async (req, res) => {
+app.post('/api/projects/:projectId/designs/generate', authenticate, aiRateLimit, async (req, res) => {
   try {
     const project = await db.getOne('SELECT * FROM projects WHERE id = $1 AND company_id = $2', [req.params.projectId, req.user.companyId]);
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
-    const areas = await db.getMany('SELECT * FROM property_areas WHERE project_id = $1', [project.id]);
+    const areas = await db.getMany('SELECT id, project_id, area_type, custom_name, sort_order FROM property_areas WHERE project_id = $1 ORDER BY sort_order LIMIT 100', [project.id]);
+    if (areas.length === 0) return res.status(400).json({ error: 'Project has no property areas. Add areas before generating designs.' });
     const company = await db.getOne('SELECT * FROM companies WHERE id = $1', [req.user.companyId]);
-    const plants = await db.getMany('SELECT * FROM plant_library WHERE (company_id = $1 OR company_id IS NULL) AND is_available = true', [req.user.companyId]);
+    const plants = await db.getMany('SELECT id, company_id, common_name, botanical_name, category, container_size, sun_requirement, water_needs, retail_price, wholesale_price, image_url, is_native, is_available FROM plant_library WHERE (company_id = $1 OR company_id IS NULL) AND is_available = true LIMIT 500', [req.user.companyId]);
+
+    // Batch-fetch all photos and existing plants for all areas (avoids N+1 per-area queries)
+    const areaIds = areas.map(a => a.id);
+    const allPhotos = areaIds.length > 0
+      ? await db.getMany(
+          'SELECT p.id, p.property_area_id, p.file_id, p.created_at, f.cdn_url FROM photos p JOIN files f ON f.id = p.file_id WHERE p.property_area_id = ANY($1) LIMIT 500',
+          [areaIds]
+        )
+      : [];
+    const allExistingPlants = areaIds.length > 0
+      ? await db.getMany('SELECT id, property_area_id, identified_name, common_name, botanical_name, mark, comment, position_x, position_y FROM existing_plants WHERE property_area_id = ANY($1) LIMIT 500', [areaIds])
+      : [];
+    // Mark all previous designs as not current in one query
+    if (areaIds.length > 0) {
+      await db.query('UPDATE designs SET is_current = false WHERE property_area_id = ANY($1)', [areaIds]);
+    }
+    // Index by area_id for O(1) lookup
+    const photosByArea = {};
+    for (const p of allPhotos) { (photosByArea[p.property_area_id] || (photosByArea[p.property_area_id] = [])).push(p); }
+    const existingPlantsByArea = {};
+    for (const ep of allExistingPlants) { (existingPlantsByArea[ep.property_area_id] || (existingPlantsByArea[ep.property_area_id] = [])).push(ep); }
 
     const designs = [];
     for (const area of areas) {
-      const photos = await db.getMany(
-        'SELECT p.*, f.cdn_url FROM photos p JOIN files f ON f.id = p.file_id WHERE p.property_area_id = $1',
-        [area.id]
-      );
-      const existingPlants = await db.getMany('SELECT * FROM existing_plants WHERE property_area_id = $1', [area.id]);
-
-      // Mark previous designs as not current
-      await db.query('UPDATE designs SET is_current = false WHERE property_area_id = $1', [area.id]);
+      const photos = photosByArea[area.id] || [];
+      const existingPlants = existingPlantsByArea[area.id] || [];
 
       const design = await db.getOne(
         `INSERT INTO designs (project_id, property_area_id, generation_status, generation_started_at, ai_prompt)
@@ -3051,7 +3144,6 @@ app.post('/api/projects/:projectId/designs/generate', authenticate, async (req, 
           // Send ALL available plants from the company's inventory — filter to actual plant categories (not services/supplies)
           const plantItems = plants.filter(p => p.common_name && !['service', 'supply'].includes((p.category || '').toLowerCase()));
           const plantNames = plantItems.map(p => `${p.common_name}${p.container_size ? ' (' + p.container_size + ')' : ''}${p.category ? ' [' + p.category + ']' : ''}${p.wholesale_price ? ' $' + p.wholesale_price : p.retail_price ? ' $' + p.retail_price : ''}`).join('\n');
-          console.log(`[design-gen] Sending ${plantItems.length} plants from inventory (of ${plants.length} total products) to AI`);
           const getPlantName = (p) => {
             const name = p.identified_name || p.common_name || p.botanical_name || '';
             // Skip corrupted names from old bug
@@ -3062,12 +3154,10 @@ app.post('/api/projects/:projectId/designs/generate', authenticate, async (req, 
           };
           const keepPlants = existingPlants.filter(p => p.mark === 'keep').map(getPlantName).join(', ');
           const removePlants = existingPlants.filter(p => p.mark === 'remove').map(getPlantName).join(', ');
-          console.log('[design-gen] Existing plants:', existingPlants.length, '| Keep:', keepPlants || '(none)', '| Remove:', removePlants || '(none)');
 
           // Pass client's raw plant request straight through — no enhancer, no middleman
           const clientRequests = project.special_requests || '';
           if (clientRequests.trim()) {
-            console.log('[design-gen] Client request (raw, no enhancer):', clientRequests.substring(0, 200));
           }
 
           // Build user message — include photo if available for context
@@ -3165,7 +3255,6 @@ ${styleGuide[designStyle] || styleGuide.naturalistic}
             userPrompt += `\nNo nursery inventory loaded — suggest the best plants you know work in this exact zone and microclimate.`;
           }
 
-          console.log('[design-gen] Prompt preview:', userPrompt.substring(0, 300));
 
           userContent.push({ type: 'text', text: userPrompt });
 
@@ -3228,17 +3317,13 @@ Return ONLY valid JSON with this exact structure:
             max_tokens: 8000,
           });
 
-          const rawContent = aiResponse.choices[0].message.content;
-          console.log('[design-gen] Raw AI response:', rawContent);
+          const rawContent = aiContent(aiResponse);
           const parsed = JSON.parse(rawContent);
           designNarrative = parsed.design_narrative || '';
-          console.log('[design-gen] Parsed keys:', Object.keys(parsed));
-          console.log('[design-gen] Has layers:', !!parsed.layers, 'Layer keys:', Object.keys(parsed.layers || {}));
 
           // Flatten layers into designPlants array with layer info
           const layers = parsed.layers || {};
           for (const [layer, layerPlants] of Object.entries(layers)) {
-            console.log(`[design-gen] Layer "${layer}": ${(layerPlants || []).length} plants`);
             for (const dp of (layerPlants || [])) {
               designPlants.push({ ...dp, layer });
             }
@@ -3246,7 +3331,6 @@ Return ONLY valid JSON with this exact structure:
           // Fallback if old format returned
           if (designPlants.length === 0 && (parsed.plants || parsed.design)) {
             designPlants = parsed.plants || parsed.design || [];
-            console.log('[design-gen] Used fallback, found:', designPlants.length, 'plants');
           }
           // HARD ENFORCE species limit — count UNIQUE species, not total entries
           const speciesMap = {};
@@ -3257,17 +3341,13 @@ Return ONLY valid JSON with this exact structure:
             speciesMap[key].items.push(dp);
           }
           const uniqueSpeciesCount = Object.keys(speciesMap).length;
-          console.log('[design-gen] Unique species count: %d, maxSpecies: %d', uniqueSpeciesCount, maxSpecies);
           if (uniqueSpeciesCount > maxSpecies) {
-            console.log('[design-gen] AI returned %d unique species but max is %d — trimming', uniqueSpeciesCount, maxSpecies);
             const sorted = Object.values(speciesMap).sort((a, b) => b.totalQty - a.totalQty);
             const keepSpecies = new Set(sorted.slice(0, maxSpecies).map(s => s.name.toLowerCase().trim()));
             designPlants = designPlants.filter(dp => keepSpecies.has((dp.common_name || dp.botanical_name || '').toLowerCase().trim()));
-            console.log('[design-gen] Trimmed to %d species: %s', maxSpecies, sorted.slice(0, maxSpecies).map(s => s.name).join(', '));
           }
 
           const actualTotal = designPlants.reduce((s, p) => s + (p.quantity || 1), 0);
-          console.log('[design-gen] Total designPlants: %d species, %d individual plants (maxSpecies=%d)', designPlants.length, actualTotal, maxSpecies);
 
           // Save design plants + narrative in design_data JSONB (design_plants table requires plant_library FK)
           await db.query(
@@ -3283,7 +3363,6 @@ Return ONLY valid JSON with this exact structure:
           console.error('AI design generation failed:', aiErr.message);
           // Retry without images if image download timed out
           if (aiErr.message && (aiErr.message.includes('Timeout while downloading') || aiErr.message.includes('Could not process image'))) {
-            console.log('[design-gen] Retrying without images...');
             try {
               const textOnlyContent = userContent.filter(c => c.type === 'text');
               const retryResponse = await openaiClient.chat.completions.create({
@@ -3299,8 +3378,7 @@ Return ONLY valid JSON with this exact structure:
                 response_format: { type: 'json_object' },
                 max_tokens: 4000,
               });
-              const retryContent = retryResponse.choices[0].message.content;
-              console.log('[design-gen] Retry response length:', retryContent.length);
+              const retryContent = aiContent(retryResponse);
               const retryParsed = JSON.parse(retryContent);
               designNarrative = retryParsed.design_narrative || '';
               const retryLayers = retryParsed.layers || {};
@@ -3312,7 +3390,6 @@ Return ONLY valid JSON with this exact structure:
               if (designPlants.length === 0 && (retryParsed.plants || retryParsed.design)) {
                 designPlants = retryParsed.plants || retryParsed.design || [];
               }
-              console.log('[design-gen] Retry success, total plants:', designPlants.length);
               await db.query(
                 `UPDATE designs SET generation_status = 'completed', generation_completed_at = NOW(),
                   design_data = $2, design_notes = $3 WHERE id = $1`,
@@ -3335,7 +3412,6 @@ Return ONLY valid JSON with this exact structure:
     }
 
     await db.query('UPDATE projects SET status = $1 WHERE id = $2', ['design_review', project.id]);
-    console.log('[design-gen] Sending response with', designs[0]?.plants?.length || 0, 'plants');
     res.json({ designs, design: designs[0], plants: designs[0]?.plants || [], narrative: designs[0]?.narrative || '', message: 'Design generation complete' });
   } catch (err) {
     console.error('Design generation error:', err);
@@ -3356,7 +3432,7 @@ app.get('/api/designs/:id', authenticate, async (req, res) => {
     const plants = await db.getMany(
       `SELECT dp.*, pl.common_name, pl.botanical_name, pl.image_url, pl.retail_price, pl.category
        FROM design_plants dp JOIN plant_library pl ON pl.id = dp.plant_library_id
-       WHERE dp.design_id = $1 ORDER BY dp.z_index`,
+       WHERE dp.design_id = $1 ORDER BY dp.z_index LIMIT 500`,
       [design.id]
     );
 
@@ -3369,7 +3445,7 @@ app.get('/api/designs/:id', authenticate, async (req, res) => {
 
 // ─── Chat Commands (design adjustments) ──────────────────────────
 
-app.post('/api/designs/:designId/chat', authenticate, async (req, res) => {
+app.post('/api/designs/:designId/chat', authenticate, aiRateLimit, async (req, res) => {
   try {
     const message = stripHtml(req.body.message);
     const design = await db.getOne(
@@ -3387,7 +3463,7 @@ app.post('/api/designs/:designId/chat', authenticate, async (req, res) => {
 
     // Send to AI for interpretation
     const designData = design.design_data ? (typeof design.design_data === 'string' ? JSON.parse(design.design_data) : design.design_data) : {};
-    const availablePlants = await db.getMany('SELECT * FROM plant_library WHERE (company_id = $1 OR company_id IS NULL) AND is_available = true ORDER BY common_name', [req.user.companyId]);
+    const availablePlants = await db.getMany('SELECT id, common_name, botanical_name, category, container_size, sun_requirement, water_needs, retail_price, wholesale_price, image_url FROM plant_library WHERE (company_id = $1 OR company_id IS NULL) AND is_available = true ORDER BY common_name LIMIT 500', [req.user.companyId]);
     const aiResponse = await callManusAI('design_chat', {
       command: message,
       currentDesign: designData.plants || [],
@@ -3453,6 +3529,7 @@ app.put('/api/design-plants/:id/position', authenticate, async (req, res) => {
        AND design_id IN (SELECT d.id FROM designs d JOIN projects p ON p.id = d.project_id WHERE p.company_id = $4) RETURNING *`,
       [positionX, positionY, req.params.id, req.user.companyId]
     );
+    if (!plant) return res.status(404).json({ error: 'Design plant not found' });
     res.json(plant);
   } catch (err) {
     console.error('PUT /api/design-plants/:id/position error:', err.message);
@@ -3469,14 +3546,16 @@ app.post('/api/designs/:designId/plants', authenticate, async (req, res) => {
     );
     if (!owned) return res.status(404).json({ error: 'Design not found' });
     const { plantLibraryId, quantity, positionX, positionY, containerSize } = req.body;
-    if (plantLibraryId) {
-      const plantOwned = await db.getOne('SELECT id FROM plant_library WHERE id = $1 AND company_id = $2', [plantLibraryId, req.user.companyId]);
-      if (!plantOwned) return res.status(403).json({ error: 'Plant not found or not owned by your company' });
-    }
+    if (!plantLibraryId) return res.status(400).json({ error: 'plantLibraryId is required' });
+    if (positionX === undefined || positionY === undefined) return res.status(400).json({ error: 'positionX and positionY are required' });
+    const qty = quantity !== undefined ? parseInt(quantity, 10) : 1;
+    if (isNaN(qty) || qty < 1 || qty > 10000) return res.status(400).json({ error: 'quantity must be between 1 and 10000' });
+    const plantOwned = await db.getOne('SELECT id FROM plant_library WHERE id = $1 AND company_id = $2', [plantLibraryId, req.user.companyId]);
+    if (!plantOwned) return res.status(403).json({ error: 'Plant not found or not owned by your company' });
     const plant = await db.getOne(
       `INSERT INTO design_plants (design_id, plant_library_id, quantity, position_x, position_y, container_size)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.params.designId, plantLibraryId, quantity, positionX, positionY, containerSize]
+      [req.params.designId, plantLibraryId, qty, positionX, positionY, containerSize]
     );
     res.status(201).json(plant);
   } catch (err) {
@@ -3487,16 +3566,13 @@ app.post('/api/designs/:designId/plants', authenticate, async (req, res) => {
 
 app.delete('/api/design-plants/:id', authenticate, async (req, res) => {
   try {
-    // Verify ownership before deleting
-    const owned = await db.getOne(
-      `SELECT dp.id FROM design_plants dp
-       JOIN designs d ON d.id = dp.design_id
-       JOIN projects p ON p.id = d.project_id
-       WHERE dp.id = $1 AND p.company_id = $2`,
+    // Atomic ownership check + delete in single query
+    const result = await db.query(
+      `DELETE FROM design_plants WHERE id = $1
+       AND design_id IN (SELECT d.id FROM designs d JOIN projects p ON p.id = d.project_id WHERE p.company_id = $2)`,
       [req.params.id, req.user.companyId]
     );
-    if (!owned) return res.status(404).json({ error: 'Design plant not found' });
-    await db.query('DELETE FROM design_plants WHERE id = $1', [req.params.id]);
+    if (!result.rowCount) return res.status(404).json({ error: 'Design plant not found' });
     res.json({ message: 'Plant removed' });
   } catch (err) {
     console.error('DELETE /api/design-plants/:id error:', err.message);
@@ -3525,39 +3601,46 @@ app.post('/api/projects/:projectId/estimates/generate', authenticate, async (req
       );
       const estimateId = est.rows[0].id;
 
-      // Get all design plants
-      const designs = await client.query('SELECT id FROM designs WHERE project_id = $1 AND is_current = true', [project.id]);
+      // Batch-fetch all design plants and design_data for all current designs (avoids N+1)
+      const designs = await client.query('SELECT id, design_data FROM designs WHERE project_id = $1 AND is_current = true', [project.id]);
+      const designIds = designs.rows.map(d => d.id);
+      const allDesignPlants = designIds.length > 0
+        ? await client.query(
+            `SELECT dp.*, dp.design_id, pl.common_name as lib_name, pl.retail_price, pl.container_size as lib_container
+             FROM design_plants dp LEFT JOIN plant_library pl ON pl.id = dp.plant_library_id
+             WHERE dp.design_id = ANY($1)`,
+            [designIds]
+          )
+        : { rows: [] };
+      const dpByDesign = {};
+      for (const dp of allDesignPlants.rows) {
+        (dpByDesign[dp.design_id] || (dpByDesign[dp.design_id] = [])).push(dp);
+      }
       let sortOrder = 0;
       let subtotal = 0;
+      const lineItemValues = [];
+      const lineItemParams = [];
+      let liIdx = 1;
 
       for (const design of designs.rows) {
-        // Try design_plants table first (populated when user manually edits plants)
-        const designPlants = await client.query(
-          `SELECT dp.*, pl.common_name as lib_name, pl.retail_price, pl.container_size as lib_container
-           FROM design_plants dp LEFT JOIN plant_library pl ON pl.id = dp.plant_library_id WHERE dp.design_id = $1`,
-          [design.id]
-        );
+        // Use pre-fetched design_plants (from batch query above)
+        let plantRows = dpByDesign[design.id] || [];
 
-        let plantRows = designPlants.rows;
-
-        // Fallback: read from design_data JSONB (where AI-generated plants are stored)
-        if (plantRows.length === 0) {
-          const designRow = await client.query('SELECT design_data FROM designs WHERE id = $1', [design.id]);
-          if (designRow.rows[0]?.design_data) {
-            const dd = typeof designRow.rows[0].design_data === 'string'
-              ? JSON.parse(designRow.rows[0].design_data)
-              : designRow.rows[0].design_data;
-            plantRows = (dd.plants || []).map(p => ({
-              common_name: p.common_name || p.name,
-              plant_name: p.plant_name || p.common_name || p.name,
-              container_size: p.container_size || '3-gal',
-              unit_cost: p.unit_cost || p.price || 25,
-              quantity: p.quantity || 1,
-              botanical_name: p.botanical_name || '',
-              layer: p.layer || '',
-            }));
-            console.log(`[estimate-gen] Read ${plantRows.length} plants from design_data JSONB for design ${design.id}`);
-          }
+        // Fallback: read from design_data JSONB (already fetched with the designs query)
+        if (plantRows.length === 0 && design.design_data) {
+          const dd = typeof design.design_data === 'string'
+            ? JSON.parse(design.design_data)
+            : design.design_data;
+          plantRows = (dd.plants || []).map(p => ({
+            common_name: p.common_name || p.name,
+            plant_name: p.plant_name || p.common_name || p.name,
+            container_size: p.container_size || '3-gal',
+            unit_cost: p.unit_cost || p.price || 25,
+            quantity: p.quantity || 1,
+            botanical_name: p.botanical_name || '',
+            layer: p.layer || '',
+          }));
+          if (plantRows.length > 0) console.log(`[estimate-gen] Read ${plantRows.length} plants from design_data JSONB for design ${design.id}`);
         }
 
         for (const dp of plantRows) {
@@ -3568,11 +3651,9 @@ app.post('/api/projects/:projectId/estimates/generate', authenticate, async (req
           const price = basePrice * (1 + markup / 100);
           const qty = parseFloat(dp.quantity) || 1;
           const total = price * qty;
-          await client.query(
-            `INSERT INTO estimate_line_items (estimate_id, category, plant_library_id, design_plant_id, description, quantity, unit, unit_price, total_price, sort_order)
-             VALUES ($1, 'plant_material', $2, $3, $4, $5, $6, $7, $8, $9)`,
-            [estimateId, dp.plant_library_id || null, dp.id || null, `${plantName} (${containerSize})`, qty, 'ea', price, total, sortOrder++]
-          );
+          lineItemValues.push(`($${liIdx}, 'plant_material', $${liIdx+1}, $${liIdx+2}, $${liIdx+3}, $${liIdx+4}, $${liIdx+5}, $${liIdx+6}, $${liIdx+7}, $${liIdx+8})`);
+          lineItemParams.push(estimateId, dp.plant_library_id || null, dp.id || null, `${plantName} (${containerSize})`, qty, 'ea', price, total, sortOrder++);
+          liIdx += 9;
           subtotal += total;
         }
       }
@@ -3597,13 +3678,21 @@ app.post('/api/projects/:projectId/estimates/generate', authenticate, async (req
         services.push({ cat: 'removal_disposal', desc: 'Plant Removal & Disposal (lump sum)', price: parseFloat(company.removal_base_fee) || 350 });
       }
 
+      // Add service rows to the bulk insert batch
       for (const svc of services) {
-        await client.query(
-          `INSERT INTO estimate_line_items (estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order)
-           VALUES ($1, $2, $3, 1, 'ea', $4, $4, $5)`,
-          [estimateId, svc.cat, svc.desc, svc.price, sortOrder++]
-        );
+        lineItemValues.push(`($${liIdx}, $${liIdx+1}, NULL, NULL, $${liIdx+2}, 1, 'ea', $${liIdx+3}, $${liIdx+3}, $${liIdx+4})`);
+        lineItemParams.push(estimateId, svc.cat, svc.desc, svc.price, sortOrder++);
+        liIdx += 5;
         subtotal += svc.price;
+      }
+
+      // Bulk INSERT all line items (plants + services) in one query
+      if (lineItemValues.length > 0) {
+        await client.query(
+          `INSERT INTO estimate_line_items (estimate_id, category, plant_library_id, design_plant_id, description, quantity, unit, unit_price, total_price, sort_order)
+           VALUES ${lineItemValues.join(', ')}`,
+          lineItemParams
+        );
       }
 
       const taxAmount = company.tax_enabled ? Math.round(subtotal * (parseFloat(company.tax_rate) || 0.0825) * 100) / 100 : 0;
@@ -3616,7 +3705,7 @@ app.post('/api/projects/:projectId/estimates/generate', authenticate, async (req
       await client.query('UPDATE projects SET estimated_total = $1 WHERE id = $2', [total, project.id]);
 
       // Fetch line items to return with the estimate
-      const lineItems = await client.query('SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [estimateId]);
+      const lineItems = await client.query('SELECT id, estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order, notes FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order LIMIT 500', [estimateId]);
       return { ...est.rows[0], subtotal, tax_amount: taxAmount, total, line_items: lineItems.rows };
     });
 
@@ -3655,7 +3744,7 @@ app.get('/api/estimates/:id', authenticate, async (req, res) => {
     const estimate = await db.getOne('SELECT * FROM estimates WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
 
-    const lineItems = await db.getMany('SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [estimate.id]);
+    const lineItems = await db.getMany('SELECT id, estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order, notes FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order LIMIT 500', [estimate.id]);
     res.json({ ...estimate, line_items: lineItems });
   } catch (err) {
     console.error('GET /api/estimates/:id error:', err.message);
@@ -3680,7 +3769,7 @@ app.put('/api/estimates/:id', authenticate, async (req, res) => {
     if (updates.length === 0) return res.json({ message: 'No fields to update' });
     values.push(req.params.id, req.user.companyId);
     const updated = await db.getOne(`UPDATE estimates SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = $${idx + 1} RETURNING *`, values);
-    const lineItems = await db.getMany('SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [req.params.id]);
+    const lineItems = await db.getMany('SELECT id, estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order, notes FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order LIMIT 500', [req.params.id]);
     res.json({ ...updated, line_items: lineItems });
   } catch (err) {
     console.error('PUT /api/estimates/:id error:', err.message);
@@ -3702,11 +3791,10 @@ app.post('/api/estimates/:id/line-items', authenticate, async (req, res) => {
     if (isNaN(price) || price < 0) return res.status(400).json({ error: 'unitPrice must be a non-negative number' });
     if (isNaN(qty) || qty <= 0) return res.status(400).json({ error: 'quantity must be greater than 0' });
     const totalPrice = Math.round(price * qty * 100) / 100;
-    const maxSort = await db.getOne('SELECT COALESCE(MAX(sort_order), -1) as max FROM estimate_line_items WHERE estimate_id = $1 FOR UPDATE', [req.params.id]);
     const item = await db.getOne(
       `INSERT INTO estimate_line_items (estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [req.params.id, category, stripHtml(description || category), qty, unit, price, totalPrice, (maxSort?.max ?? -1) + 1, notes ? stripHtml(notes) : null]
+       VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM estimate_line_items WHERE estimate_id = $1), $8) RETURNING *`,
+      [req.params.id, category, stripHtml(description || category), qty, unit, price, totalPrice, notes ? stripHtml(notes) : null]
     );
     // Recalculate totals
     const items = await db.getMany('SELECT total_price FROM estimate_line_items WHERE estimate_id = $1', [req.params.id]);
@@ -3794,10 +3882,10 @@ app.post('/api/projects/:projectId/submittals/generate', authenticate, async (re
 
     // Get all unique plants from designs
     const designPlants = await db.getMany(
-      `SELECT DISTINCT ON (pl.id) pl.* FROM design_plants dp
+      `SELECT DISTINCT ON (pl.id) pl.id, pl.common_name, pl.botanical_name, pl.category, pl.container_size, pl.sun_requirement, pl.water_needs, pl.image_url, pl.description, pl.retail_price, pl.wholesale_price, pl.is_native FROM design_plants dp
        JOIN plant_library pl ON pl.id = dp.plant_library_id
        JOIN designs d ON d.id = dp.design_id
-       WHERE d.project_id = $1 AND d.is_current = true`, [project.id]
+       WHERE d.project_id = $1 AND d.is_current = true LIMIT 500`, [project.id]
     );
 
     // Generate scope narrative via AI
@@ -3822,12 +3910,21 @@ app.post('/api/projects/:projectId/submittals/generate', authenticate, async (re
       );
 
       // Add plant profiles with full details for PDF
-      for (let i = 0; i < designPlants.length; i++) {
-        const p = designPlants[i];
+      // Bulk INSERT all plant profiles in one query
+      if (designPlants.length > 0) {
+        const spValues = [];
+        const spParams = [];
+        let spIdx = 1;
+        for (let i = 0; i < designPlants.length; i++) {
+          const p = designPlants[i];
+          spValues.push(`($${spIdx}, $${spIdx+1}, $${spIdx+2}, $${spIdx+3}, $${spIdx+4}, $${spIdx+5}, $${spIdx+6}, $${spIdx+7}, $${spIdx+8}, $${spIdx+9}, $${spIdx+10}, $${spIdx+11}, $${spIdx+12}, $${spIdx+13})`);
+          spParams.push(sub.rows[0].id, p.id || null, i, p.common_name, p.common_name, p.botanical_name || null, p.container_size || null, p.quantity || 1, p.description || p.poetic_description || null, p.image_url || null, `${p.bloom_color || ''} ${p.bloom_season || ''}`.trim() || null, p.water_needs || null, p.sun_requirement || null, p.poetic_description || null);
+          spIdx += 14;
+        }
         await client.query(
           `INSERT INTO submittal_plant_profiles (submittal_id, plant_library_id, sort_order, plant_name, common_name, botanical_name, container_size, quantity, description, image_url, bloom_info, water_info, sun_info, poetic_desc)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-          [sub.rows[0].id, p.id || null, i, p.common_name, p.common_name, p.botanical_name || null, p.container_size || null, p.quantity || 1, p.description || p.poetic_description || null, p.image_url || null, `${p.bloom_color || ''} ${p.bloom_season || ''}`.trim() || null, p.water_needs || null, p.sun_requirement || null, p.poetic_description || null]
+           VALUES ${spValues.join(', ')}`,
+          spParams
         );
       }
 
@@ -3852,7 +3949,7 @@ app.get('/api/submittals/:id', authenticate, async (req, res) => {
     const submittal = await db.getOne('SELECT * FROM submittals WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
     if (!submittal) return res.status(404).json({ error: 'Submittal not found' });
 
-    const plantProfiles = await db.getMany('SELECT * FROM submittal_plant_profiles WHERE submittal_id = $1 ORDER BY sort_order', [submittal.id]);
+    const plantProfiles = await db.getMany('SELECT id, submittal_id, plant_library_id, sort_order, plant_name, common_name, botanical_name, container_size, quantity, description, image_url, bloom_info, water_info, sun_info, poetic_desc FROM submittal_plant_profiles WHERE submittal_id = $1 ORDER BY sort_order LIMIT 500', [submittal.id]);
     res.json({ ...submittal, narrative: submittal.scope_narrative, plantProfiles });
   } catch (err) {
     console.error('GET /api/submittals/:id error:', err.message);
@@ -3864,7 +3961,7 @@ app.put('/api/submittals/:id', authenticate, async (req, res) => {
   try {
     const submittal = await db.getOne('SELECT id FROM submittals WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
     if (!submittal) return res.status(404).json({ error: 'Submittal not found' });
-    const stringFields = ['scope_narrative', 'closing_statement', 'warranty_text', 'notes'];
+    const stringFields = ['scope_narrative', 'closing_notes', 'notes'];
     const allowed = [...stringFields, 'status'];
     const updates = [], values = [];
     let idx = 1;
@@ -3878,7 +3975,7 @@ app.put('/api/submittals/:id', authenticate, async (req, res) => {
     if (updates.length === 0) return res.json({ message: 'No fields to update' });
     values.push(req.params.id, req.user.companyId);
     const updated = await db.getOne(`UPDATE submittals SET ${updates.join(', ')} WHERE id = $${idx} AND company_id = $${idx + 1} RETURNING *`, values);
-    const plantProfiles = await db.getMany('SELECT * FROM submittal_plant_profiles WHERE submittal_id = $1 ORDER BY sort_order', [req.params.id]);
+    const plantProfiles = await db.getMany('SELECT id, submittal_id, plant_library_id, sort_order, plant_name, common_name, botanical_name, container_size, quantity, description, image_url, bloom_info, water_info, sun_info, poetic_desc FROM submittal_plant_profiles WHERE submittal_id = $1 ORDER BY sort_order LIMIT 500', [req.params.id]);
     res.json({ ...updated, plantProfiles });
   } catch (err) {
     console.error('PUT /api/submittals/:id error:', err.message);
@@ -3890,7 +3987,7 @@ app.get('/api/projects/:projectId/submittals', authenticate, async (req, res) =>
   try {
     const project = await db.getOne('SELECT id FROM projects WHERE id = $1 AND company_id = $2', [req.params.projectId, req.user.companyId]);
     if (!project) return res.status(404).json({ error: 'Project not found' });
-    const submittals = await db.getMany('SELECT * FROM submittals WHERE project_id = $1 ORDER BY created_at DESC', [req.params.projectId]);
+    const submittals = await db.getMany('SELECT id, project_id, company_id, is_current, status, scope_narrative, pdf_url, created_at, updated_at FROM submittals WHERE project_id = $1 AND company_id = $2 ORDER BY created_at DESC LIMIT 50', [req.params.projectId, req.user.companyId]);
     res.json(submittals);
   } catch (err) {
     console.error('GET /api/projects/:projectId/submittals error:', err.message);
@@ -3910,7 +4007,7 @@ app.get('/api/projects/:projectId/revisions', authenticate, async (req, res) => 
     const revisions = await db.getMany(
       `SELECT r.*, u.first_name, u.last_name FROM revisions r
        JOIN users u ON u.id = r.user_id
-       WHERE r.project_id = $1 ORDER BY r.created_at DESC`,
+       WHERE r.project_id = $1 ORDER BY r.created_at DESC LIMIT 100`,
       [req.params.projectId]
     );
     res.json(revisions);
@@ -3987,17 +4084,49 @@ app.delete('/api/team/:userId', authenticateOnly, requireAdmin, async (req, res)
   }
 });
 
+// ─── Activity log ─────────────────────────────────────────────────
+app.get('/api/activity', authenticateOnly, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+    const offset = parseInt(req.query.offset) || 0;
+    const rows = await db.getMany(
+      `SELECT a.*, u.first_name, u.last_name, u.email as user_email
+       FROM activity_log a LEFT JOIN users u ON u.id = a.user_id
+       WHERE a.company_id = $1 ORDER BY a.created_at DESC LIMIT $2 OFFSET $3`,
+      [req.user.companyId, limit, offset]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /api/activity error:', err.message);
+    res.status(500).json({ error: 'Failed to load activity' });
+  }
+});
+
+// ─── Plant library alias ───────────────────────────────────────────
+app.get('/api/plant-library', authenticate, async (req, res) => {
+  try {
+    const rows = await db.getMany(
+      'SELECT * FROM plant_library WHERE company_id = $1 OR is_global = true ORDER BY common_name ASC',
+      [req.user.companyId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /api/plant-library error:', err.message);
+    res.status(500).json({ error: 'Failed to load plant library' });
+  }
+});
+
 // ─── Per-project export (used by wizard step 8 CRM push) ─────────
 app.get('/api/projects/:projectId/export', authenticateOnly, async (req, res) => {
   try {
     const project = await db.getOne('SELECT * FROM v_active_projects WHERE id = $1 AND company_id = $2', [req.params.projectId, req.user.companyId]);
     if (!project) return res.status(404).json({ error: 'Project not found' });
 
-    const areas = await db.getMany('SELECT * FROM property_areas WHERE project_id = $1', [project.id]);
-    const design = await db.getOne('SELECT * FROM designs WHERE project_id = $1 AND is_current = true ORDER BY created_at DESC LIMIT 1', [project.id]);
-    const estimate = await db.getOne('SELECT * FROM estimates WHERE project_id = $1 AND is_current = true ORDER BY created_at DESC LIMIT 1', [project.id]);
-    const lineItems = estimate ? await db.getMany('SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [estimate.id]) : [];
-    const submittal = await db.getOne('SELECT * FROM submittals WHERE project_id = $1 AND is_current = true ORDER BY created_at DESC LIMIT 1', [project.id]);
+    const areas = await db.getMany('SELECT id, project_id, area_type, custom_name, sort_order, created_at FROM property_areas WHERE project_id = $1 ORDER BY sort_order LIMIT 100', [project.id]);
+    const design = await db.getOne('SELECT id, project_id, property_area_id, is_current, generation_status, design_data, ai_prompt, created_at, updated_at FROM designs WHERE project_id = $1 AND is_current = true ORDER BY created_at DESC LIMIT 1', [project.id]);
+    const estimate = await db.getOne('SELECT id, project_id, company_id, is_current, status, subtotal, tax_amount, tax_rate, tax_enabled, total, notes, terms, warranty, valid_until, labor_method, material_markup, created_at, updated_at FROM estimates WHERE project_id = $1 AND is_current = true ORDER BY created_at DESC LIMIT 1', [project.id]);
+    const lineItems = estimate ? await db.getMany('SELECT id, estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order, notes FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order LIMIT 500', [estimate.id]) : [];
+    const submittal = await db.getOne('SELECT id, project_id, company_id, is_current, status, scope_narrative, pdf_url, created_at, updated_at FROM submittals WHERE project_id = $1 AND is_current = true ORDER BY created_at DESC LIMIT 1', [project.id]);
 
     res.json({
       project,
@@ -4019,7 +4148,7 @@ app.get('/api/projects/:projectId/export', authenticateOnly, async (req, res) =>
 
 app.get('/api/export/projects', authenticateOnly, async (req, res) => {
   try {
-    const projects = await db.getMany('SELECT * FROM projects WHERE company_id = $1', [req.user.companyId]);
+    const projects = await db.getMany('SELECT id, company_id, client_id, name, status, address, sun_exposure, design_style, special_requests, lighting_requested, estimated_total, created_at, updated_at FROM projects WHERE company_id = $1 ORDER BY created_at DESC LIMIT 500', [req.user.companyId]);
     res.json(projects);
   } catch (err) {
     console.error('GET /api/export/projects error:', err.message);
@@ -4030,7 +4159,7 @@ app.get('/api/export/projects', authenticateOnly, async (req, res) => {
 app.get('/api/export/plants/csv', authenticateOnly, async (req, res) => {
   try {
     const plants = await db.getMany(
-      'SELECT common_name, botanical_name, category, container_size, retail_price, sun_requirement, water_needs FROM plant_library WHERE company_id = $1 OR company_id IS NULL',
+      'SELECT common_name, botanical_name, category, container_size, retail_price, sun_requirement, water_needs FROM plant_library WHERE company_id = $1 OR company_id IS NULL ORDER BY common_name LIMIT 5000',
       [req.user.companyId]
     );
 
@@ -4063,14 +4192,6 @@ async function callManusAI(taskType, data) {
   return callAI(taskType, data);
 }
 
-async function triggerAIJob(companyId, projectId, designId, jobType, inputData) {
-  return db.getOne(
-    `INSERT INTO ai_jobs (company_id, project_id, design_id, job_type, input_data, status)
-     VALUES ($1, $2, $3, $4, $5, 'queued') RETURNING *`,
-    [companyId, projectId, designId, jobType, inputData]
-  );
-}
-
 // AI job status polling
 app.get('/api/ai-jobs/:id', authenticate, async (req, res) => {
   try {
@@ -4088,7 +4209,7 @@ app.get('/api/projects/:projectId/ai-jobs', authenticate, async (req, res) => {
     const project = await db.getOne('SELECT id FROM projects WHERE id = $1 AND company_id = $2', [req.params.projectId, req.user.companyId]);
     if (!project) return res.status(404).json({ error: 'Project not found' });
     const jobs = await db.getMany(
-      'SELECT * FROM ai_jobs WHERE project_id = $1 ORDER BY created_at DESC',
+      'SELECT id, company_id, project_id, design_id, job_type, status, input_data, output_data, error_message, created_at, updated_at FROM ai_jobs WHERE project_id = $1 ORDER BY created_at DESC LIMIT 100',
       [req.params.projectId]
     );
     res.json(jobs);
@@ -4114,7 +4235,7 @@ async function handleStripeWebhook(req, res) {
   try {
     await db.query(
       'INSERT INTO webhook_events (source, event_type, event_id, payload) VALUES ($1, $2, $3, $4) ON CONFLICT (source, event_id) DO NOTHING',
-      ['stripe', event.type, event.id, event.data]
+      ['stripe', event.type, event.id, JSON.stringify(event.data)]
     );
   } catch (logErr) {
     console.error('[webhook] Failed to log event (non-fatal):', logErr.message);
@@ -4235,6 +4356,7 @@ async function handleStripeWebhook(req, res) {
   } catch (err) {
     console.error('Webhook processing error:', err);
     await db.query('UPDATE webhook_events SET error = $1 WHERE event_id = $2', [err.message, event.id]).catch(() => {});
+    return res.status(500).json({ error: 'Webhook processing failed' });
   }
 
   res.json({ received: true });
@@ -4250,8 +4372,6 @@ function mapStripeStatus(stripeStatus) {
 // ═══════════════════════════════════════════════════════════════════
 
 const crmManager = new CRMManager(db);
-const stripeManager = stripe ? new StripeManager(db, { secretKey: config.stripe.secretKey, webhookSecret: config.stripe.webhookSecret }) : null;
-const pdfEngine = createPDFEngine(db, supaStorage);
 
 async function triggerCrmSync(companyId, entityType, entityId, action, data) {
   // Fire-and-forget — never crashes calling route
@@ -4291,7 +4411,10 @@ app.post('/api/ai/detect-plants', authenticate, aiRateLimit, async (req, res) =>
     if (!openaiClient) return res.status(503).json({ error: 'AI service not configured' });
     const { imageUrl, location, usdaZone } = req.body;
     if (!imageUrl) return res.status(400).json({ error: 'imageUrl is required' });
-    if (!imageUrl.startsWith('data:')) validateUrlForSSRF(imageUrl);
+    if (!imageUrl.startsWith('data:')) {
+      const ssrfErr = validateUrlForSSRF(imageUrl);
+      if (ssrfErr) return res.status(400).json({ error: ssrfErr });
+    }
 
     const locationContext = location
       ? `This property is in ${location.city}, ${location.state} (USDA Zone ${usdaZone || 'unknown'}).`
@@ -4328,7 +4451,7 @@ Return ONLY valid JSON: { "plants": [...] }`,
       temperature: 0.2,
     });
 
-    const result = JSON.parse(response.choices[0].message.content);
+    const result = JSON.parse(aiContent(response));
     res.json({ success: true, plants: result.plants || [] });
   } catch (err) {
     console.error('[AI Proxy] detect-plants error:', err);
@@ -4349,7 +4472,10 @@ app.post('/api/ai/generate-design', authenticate, aiRateLimit, async (req, res) 
     const userContent = [];
 
     if (photoBase64) {
-      if (!photoBase64.startsWith('data:')) validateUrlForSSRF(photoBase64);
+      if (!photoBase64.startsWith('data:')) {
+        const ssrfErr = validateUrlForSSRF(photoBase64);
+        if (ssrfErr) return res.status(400).json({ error: ssrfErr });
+      }
       userContent.push({ type: 'image_url', image_url: { url: photoBase64, detail: 'high' } });
     }
 
@@ -4393,7 +4519,7 @@ Create a complete plant placement plan. Return JSON with: design_rationale, plan
       temperature: 0.4,
     });
 
-    const data = JSON.parse(response.choices[0].message.content);
+    const data = JSON.parse(aiContent(response));
     res.json({ success: true, data });
   } catch (err) {
     console.error('[AI Proxy] generate-design error:', err);
@@ -4432,7 +4558,7 @@ Interpret the command and return the action JSON.`,
       temperature: 0.3,
     });
 
-    const result = JSON.parse(response.choices[0].message.content);
+    const result = JSON.parse(aiContent(response));
     res.json({
       success: true,
       message: result.message || 'Design updated.',
@@ -4488,7 +4614,7 @@ Write the narrative and closing statement as JSON.`,
       temperature: 0.6,
     });
 
-    const result = JSON.parse(response.choices[0].message.content);
+    const result = JSON.parse(aiContent(response));
     res.json({
       success: true,
       text: result.narrative || result.text || '',
@@ -4925,12 +5051,13 @@ mountCRMRoutes(app, crmManager, authenticate, requireAdmin);
 // ═══════════════════════════════════════════════════════════════════
 
 app.post('/api/estimates/:id/pdf', authenticate, async (req, res) => {
+  if (!supaStorage) return res.status(503).json({ error: 'Storage not configured' });
   try {
     const est = await db.getOne('SELECT * FROM estimates WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
     if (!est) return res.status(404).json({ error: 'Estimate not found' });
     const proj = await db.getOne(`SELECT p.*, c.display_name as client_name, c.address_line1, c.city, c.state, c.zip FROM projects p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = $1`, [est.project_id]);
     const co = await db.getOne('SELECT * FROM companies WHERE id = $1', [req.user.companyId]);
-    const items = await db.getMany('SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [req.params.id]);
+    const items = await db.getMany('SELECT id, estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order, notes FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order LIMIT 500', [req.params.id]);
     const PDFDocument = (await import('pdfkit')).default;
     const doc = new PDFDocument({ size: 'letter', margins: { top: 50, bottom: 60, left: 55, right: 55 }, info: { Title: `Estimate - ${proj?.client_name || 'Client'}`, Author: co?.name || 'FILO' }});
     const chunks = []; doc.on('data', ch => chunks.push(ch));
@@ -4958,18 +5085,19 @@ app.post('/api/estimates/:id/pdf', authenticate, async (req, res) => {
     const sKey = `${req.user.companyId}/estimate_pdf/${req.params.id}.pdf`;
     await supaStorage.upload(sKey, pdfBuf, 'application/pdf');
     const pdfUrl = supaStorage.getPublicUrl(sKey);
-    await db.query('UPDATE estimates SET pdf_url = $1 WHERE id = $2', [pdfUrl, req.params.id]);
+    await db.query('UPDATE estimates SET pdf_file_id = (SELECT id FROM files WHERE cdn_url = $1 AND company_id = $2 LIMIT 1) WHERE id = $3', [pdfUrl, req.user.companyId, req.params.id]).catch(() => {});
     res.json({ success: true, pdfUrl });
   } catch (err) { console.error('[estimates/pdf] Error:', err.message); res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
 app.post('/api/estimates/:id/pdf/all', authenticate, async (req, res) => {
+  if (!supaStorage) return res.status(503).json({ error: 'Storage not configured' });
   try {
     const est = await db.getOne('SELECT * FROM estimates WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
     if (!est) return res.status(404).json({ error: 'Estimate not found' });
     const proj = await db.getOne(`SELECT p.*, c.display_name as client_name, c.address_line1, c.city, c.state, c.zip FROM projects p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = $1`, [est.project_id]);
     const co = await db.getOne('SELECT * FROM companies WHERE id = $1', [req.user.companyId]);
-    const items = await db.getMany('SELECT * FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order', [req.params.id]);
+    const items = await db.getMany('SELECT id, estimate_id, category, description, quantity, unit, unit_price, total_price, sort_order, notes FROM estimate_line_items WHERE estimate_id = $1 ORDER BY sort_order LIMIT 500', [req.params.id]);
     const PDFDocument = (await import('pdfkit')).default;
     const doc = new PDFDocument({ size: 'letter', margins: { top: 50, bottom: 60, left: 55, right: 55 }, info: { Title: `Estimate - ${proj?.client_name || 'Client'}`, Author: co?.name || 'FILO' }});
     const chunks = []; doc.on('data', ch => chunks.push(ch));
@@ -4997,7 +5125,7 @@ app.post('/api/estimates/:id/pdf/all', authenticate, async (req, res) => {
     const sKey = `${req.user.companyId}/estimate_pdf/${req.params.id}.pdf`;
     await supaStorage.upload(sKey, pdfBuf, 'application/pdf');
     const pdfUrl = supaStorage.getPublicUrl(sKey);
-    await db.query('UPDATE estimates SET pdf_url = $1 WHERE id = $2', [pdfUrl, req.params.id]);
+    await db.query('UPDATE estimates SET pdf_file_id = (SELECT id FROM files WHERE cdn_url = $1 AND company_id = $2 LIMIT 1) WHERE id = $3', [pdfUrl, req.user.companyId, req.params.id]).catch(() => {});
     res.json({ success: true, pdfUrl });
   } catch (err) { console.error('[estimates/pdf] Error:', err.message); res.status(500).json({ error: safeErrorMessage(err) }); }
 });
@@ -5007,14 +5135,13 @@ app.post('/api/submittals/:id/pdf', authenticate, async (req, res) => {
     let designRenderUrl = req.body?.designRenderUrl || null;
 
     // If the frontend sent a data URL for the render, upload it to storage first
-    if (designRenderUrl && designRenderUrl.startsWith('data:')) {
+    if (designRenderUrl && designRenderUrl.startsWith('data:') && supaStorage) {
       try {
         const b64 = designRenderUrl.replace(/^data:image\/[^;]+;base64,/, '');
         const imgBuffer = Buffer.from(b64, 'base64');
         const storageKey = `${req.user.companyId}/renders/submittal-${req.params.id}.jpg`;
         await supaStorage.upload(storageKey, imgBuffer, 'image/jpeg');
         designRenderUrl = supaStorage.getPublicUrl(storageKey);
-        console.log('[submittals/pdf] Uploaded design render to storage:', designRenderUrl.substring(0, 80));
       } catch (uploadErr) {
         console.warn('[submittals/pdf] Render upload failed, using data URL:', uploadErr.message);
         // Keep the data URL — the PDF engine can handle it
@@ -5032,7 +5159,42 @@ app.post('/api/submittals/:id/pdf', authenticate, async (req, res) => {
 });
 
 app.post('/api/submittals/:id/pdf-and-push', authenticate, async (req, res) => {
-  res.status(501).json({ error: 'PDF generation and CRM push not yet implemented.' });
+  try {
+    let designRenderUrl = req.body?.designRenderUrl || null;
+
+    if (designRenderUrl && designRenderUrl.startsWith('data:') && supaStorage) {
+      try {
+        const b64 = designRenderUrl.replace(/^data:image\/[^;]+;base64,/, '');
+        const imgBuffer = Buffer.from(b64, 'base64');
+        const storageKey = `${req.user.companyId}/renders/submittal-push-${req.params.id}.jpg`;
+        await supaStorage.upload(storageKey, imgBuffer, 'image/jpeg');
+        designRenderUrl = supaStorage.getPublicUrl(storageKey);
+      } catch (uploadErr) {
+        console.warn('[submittals/pdf-and-push] Render upload failed:', uploadErr.message);
+      }
+    }
+
+    const { SubmittalPDFGenerator } = await import('./filo-pdf-engine.js');
+    const generator = new SubmittalPDFGenerator(db, supaStorage);
+    const pdfResult = await generator.generate(req.params.id, req.user.companyId, { designRenderUrl });
+
+    let crmResult = { synced: false, reason: 'no CRM configured' };
+    try {
+      const submittal = await db.getOne('SELECT project_id FROM submittals WHERE id = $1 AND company_id = $2', [req.params.id, req.user.companyId]);
+      if (submittal) {
+        await crmManager.syncProject(req.user.companyId, submittal.project_id);
+        crmResult = { synced: true };
+      }
+    } catch (crmErr) {
+      console.warn('[submittals/pdf-and-push] CRM sync failed (non-fatal):', crmErr.message);
+      crmResult = { synced: false, reason: 'CRM sync failed' };
+    }
+
+    res.json({ ...pdfResult, crm: crmResult });
+  } catch (err) {
+    console.error('[submittals/pdf-and-push] Error:', err.message);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
 });
 
 // ─── File Download ───────────────────────────────────────────────
@@ -5076,7 +5238,7 @@ app.post('/api/public/checkout', async (req, res) => {
     res.json({ sessionId: session.id, url: session.url });
   } catch (err) {
     console.error('[public/checkout] Error:', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Checkout failed' });
   }
 });
 
@@ -5097,6 +5259,102 @@ app.get('/api/health', async (req, res) => {
   health.services.stripe = stripe ? 'configured' : 'not configured';
   health.services.storage = supaStorage ? 'supabase' : 'not configured';
   res.json(health);
+});
+
+
+// ═══════════════════════════════════════════════════════════════════
+// CRM INTEGRATION ROUTES (stubs — wired to frontend, pending full implementation)
+// ═══════════════════════════════════════════════════════════════════
+
+app.get('/api/crm/status', authenticate, async (req, res) => {
+  try {
+    const integration = await db.getOne(
+      'SELECT * FROM crm_integrations WHERE company_id = $1 AND is_active = true',
+      [req.user.companyId]
+    );
+    res.json({
+      connected: !!integration,
+      provider: integration?.provider || null,
+      lastSync: integration?.last_sync_at || null,
+    });
+  } catch (err) {
+    console.error('[crm/status] Error:', err.message);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+app.get('/api/crm/providers', authenticate, async (req, res) => {
+  res.json([
+    { id: 'jobber', name: 'Jobber', description: 'Sync clients, projects, and estimates with Jobber' },
+    { id: 'servicetitan', name: 'ServiceTitan', description: 'Sync with ServiceTitan CRM' },
+  ]);
+});
+
+app.post('/api/crm/connect', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const { provider, credentials } = req.body;
+    const apiKey = credentials?.apiKey || req.body.apiKey;
+    if (!provider || !apiKey) return res.status(400).json({ error: 'provider and apiKey are required' });
+    const allowed = ['jobber', 'servicetitan'];
+    if (!allowed.includes(provider)) return res.status(400).json({ error: 'Unsupported CRM provider' });
+    await db.query(
+      `INSERT INTO crm_integrations (company_id, provider, api_key, is_active)
+       VALUES ($1, $2, $3, true)
+       ON CONFLICT (company_id) DO UPDATE SET provider = $2, api_key = $3, is_active = true`,
+      [req.user.companyId, provider, apiKey]
+    );
+    res.json({ connected: true, provider });
+  } catch (err) {
+    console.error('[crm/connect] Error:', err.message);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+app.post('/api/crm/disconnect', authenticate, requireAdmin, async (req, res) => {
+  try {
+    await db.query(
+      'UPDATE crm_integrations SET is_active = false WHERE company_id = $1',
+      [req.user.companyId]
+    );
+    res.json({ connected: false });
+  } catch (err) {
+    console.error('[crm/disconnect] Error:', err.message);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+app.post('/api/crm/sync/full/:projectId', authenticate, async (req, res) => {
+  try {
+    const project = await db.getOne(
+      'SELECT id, name FROM projects WHERE id = $1 AND company_id = $2',
+      [req.params.projectId, req.user.companyId]
+    );
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    // Delegate to CRM framework if available
+    try {
+      await crmManager.syncFullProject(req.user.companyId, req.params.projectId);
+      res.json({ synced: true, projectId: req.params.projectId });
+    } catch (syncErr) {
+      console.error('[crm/sync] Sync error:', syncErr.message);
+      res.status(503).json({ error: 'CRM sync failed. Check your CRM connection.' });
+    }
+  } catch (err) {
+    console.error('[crm/sync] Error:', err.message);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
+});
+
+app.get('/api/crm/sync-log', authenticate, async (req, res) => {
+  try {
+    const logs = await db.getMany(
+      'SELECT * FROM crm_sync_log WHERE company_id = $1 ORDER BY synced_at DESC LIMIT 50',
+      [req.user.companyId]
+    );
+    res.json(logs);
+  } catch (err) {
+    console.error('[crm/sync-log] Error:', err.message);
+    res.status(500).json({ error: safeErrorMessage(err) });
+  }
 });
 
 app.get('/api/ping', (req, res) => res.json({ pong: true }));

@@ -20,6 +20,18 @@ const config = {
 // Defer instantiation — only create if key is present, avoids crash at import time
 const openai = config.openaiKey ? new OpenAI({ apiKey: config.openaiKey, timeout: 120_000 }) : null;
 
+// Sanitize user-provided strings before injecting into AI prompts
+function sanitizeForPrompt(value, maxLength = 500) {
+  if (!value) return '';
+  return String(value)
+    .replace(/[<>]/g, '')
+    .replace(/```/g, '')
+    .replace(/\bsystem\b:/gi, '')
+    .replace(/\brole\b:\s*"?system/gi, '')
+    .substring(0, maxLength)
+    .trim();
+}
+
 // ─── System Prompts ──────────────────────────────────────────────
 
 const PROMPTS = {
@@ -158,7 +170,7 @@ export default class AIService {
 
   async detectPlants(photoUrl, areaId, options = {}) {
     if (!openai) return { success: false, error: 'OpenAI not configured', plants: [] };
-    const { location, usdaZone } = options;
+    const { location, usdaZone, photoId } = options;
 
     try {
       const locationContext = location
@@ -188,22 +200,29 @@ export default class AIService {
         temperature: 0.2,
       });
 
-      const result = JSON.parse(response.choices[0].message.content);
+      let result;
+      try {
+        result = JSON.parse(response.choices[0].message.content);
+      } catch (parseErr) {
+        console.error('[AI:detectPlants] Failed to parse AI response:', response.choices[0]?.message?.content?.substring(0, 500));
+        return { success: false, error: 'AI returned invalid response format', plants: [] };
+      }
       const plants = result.plants || [];
 
       // Store detected plants in the database
       const savedPlants = [];
       for (const plant of plants) {
         const saved = await this.db.getOne(
-          `INSERT INTO existing_plants (property_area_id, identified_name, confidence, mark, position_x, position_y, bounding_box, comment)
-           VALUES ($1, $2, $3, 'keep', $4, $5, $6, $7) RETURNING *`,
+          `INSERT INTO existing_plants (property_area_id, photo_id, identified_name, confidence, mark, position_x, position_y, bounding_box, comment)
+           VALUES ($1, $2, $3, $4, 'keep', $5, $6, $7, $8) RETURNING *`,
           [
             areaId,
+            photoId || null,
             `${plant.common_name}${plant.botanical_name ? ` (${plant.botanical_name})` : ''}`,
             plant.confidence,
             plant.position_x,
             plant.position_y,
-            JSON.stringify(plant.bounding_box || {}),
+            plant.bounding_box || {},
             plant.health_assessment ? `Health: ${plant.health_assessment}. Size: ~${plant.approximate_size || 'unknown'}` : null,
           ]
         );
@@ -232,8 +251,12 @@ export default class AIService {
     if (!openai) return { success: false, error: 'OpenAI not configured' };
     const {
       photoUrls, sunExposure, designStyle, specialRequests,
-      availablePlants, existingPlants, location, lighting, hardscape,
+      availablePlants = [], existingPlants = [], location, lighting, hardscape,
     } = options;
+
+    if (!photoUrls || photoUrls.length === 0) {
+      return { success: false, error: 'No photo URLs provided' };
+    }
 
     try {
       // Step 1: Generate plant placement plan via GPT-4o
@@ -268,8 +291,16 @@ export default class AIService {
         return plantPlan;
       }
 
-      // Step 2: Store plant placements in the database
-      const placements = plantPlan.data.plant_placements || [];
+      // Step 2: Store plant placements in the database (validate plant_library_id exists)
+      const allPlacements = plantPlan.data.plant_placements || [];
+      const validPlantIds = new Set(availablePlants.map(p => p.id));
+      const placements = allPlacements.filter(p => {
+        if (!p.plant_library_id || !validPlantIds.has(p.plant_library_id)) {
+          console.warn(`[AI:generateDesign] Skipping invalid plant_library_id: ${p.plant_library_id} (${p.common_name})`);
+          return false;
+        }
+        return true;
+      });
       for (const placement of placements) {
         await this.db.query(
           `INSERT INTO design_plants (design_id, plant_library_id, quantity, container_size, position_x, position_y, z_index, layer, notes)
@@ -371,9 +402,9 @@ SITE CONDITIONS:
 - Design style: ${context.designStyle || 'naturalistic'}
 
 CLIENT REQUESTS:
-${context.specialRequests || 'No special requests.'}
-${context.lighting ? `- Lighting requested: ${JSON.stringify(context.lighting)}` : ''}
-${context.hardscape ? `- Hardscape notes: ${context.hardscape}` : ''}
+${sanitizeForPrompt(context.specialRequests) || 'No special requests.'}
+${context.lighting ? `- Lighting requested: ${sanitizeForPrompt(typeof context.lighting === 'string' ? context.lighting : JSON.stringify(context.lighting))}` : ''}
+${context.hardscape ? `- Hardscape notes: ${sanitizeForPrompt(context.hardscape)}` : ''}
 
 EXISTING PLANTS TO KEEP (do NOT place anything where these are):
 ${context.existingPlantsToKeep?.map(p => `- ${p.identified_name} at position (${p.position_x}, ${p.position_y})`).join('\n') || 'None'}
@@ -398,7 +429,13 @@ Create a complete plant placement plan using ONLY plants from the available inve
         temperature: 0.4,
       });
 
-      const data = JSON.parse(response.choices[0].message.content);
+      let data;
+      try {
+        data = JSON.parse(response.choices[0].message.content);
+      } catch (parseErr) {
+        console.error('[AI:generatePlantPlan] Failed to parse AI response:', response.choices[0]?.message?.content?.substring(0, 500));
+        return { success: false, error: 'AI returned invalid response format' };
+      }
       return { success: true, data };
     } catch (err) {
       console.error('[AI:generatePlantPlan] Error:', err);
@@ -449,6 +486,7 @@ Create a complete plant placement plan using ONLY plants from the available inve
   }
 
   async generateWithDalle(prompt) {
+    if (!openai) throw new Error('OpenAI not configured');
     // Uses gpt-image-1 via images.generate for text-to-image landscape rendering.
     // Note: images.edit (inpainting) is used by /removal-preview and /design-render routes
     // in filo-api-server.js for photo-based editing with masks.
@@ -490,6 +528,7 @@ Create a complete plant placement plan using ONLY plants from the available inve
   }
 
   async generateWithReplicate(prompt, referencePhotoUrl) {
+    if (!config.replicateToken) throw new Error('Replicate not configured');
     // Dynamic import — avoids crashing the module if 'replicate' isn't installed
     const { default: Replicate } = await import('replicate');
     const replicate = new Replicate({ auth: config.replicateToken });
@@ -527,6 +566,8 @@ Create a complete plant placement plan using ONLY plants from the available inve
 
   async processDesignChat(command, designId, currentPlants, availablePlants) {
     if (!openai) return { success: false, message: 'AI service not configured', actions: [] };
+    // Sanitize user command to prevent prompt injection
+    const safeCommand = sanitizeForPrompt(command, 500);
     try {
       const response = await openai.chat.completions.create({
         model: config.gptModel,
@@ -534,7 +575,7 @@ Create a complete plant placement plan using ONLY plants from the available inve
           { role: 'system', content: PROMPTS.DESIGN_CHAT },
           {
             role: 'user',
-            content: `User command: "${command}"
+            content: `<user_command>${safeCommand}</user_command>
 
 Current design plants:
 ${JSON.stringify(currentPlants.map(p => ({
@@ -565,7 +606,13 @@ Interpret the command and return the action JSON.`,
         temperature: 0.3,
       });
 
-      const result = JSON.parse(response.choices[0].message.content);
+      let result;
+      try {
+        result = JSON.parse(response.choices[0].message.content);
+      } catch (parseErr) {
+        console.error('[AI:processDesignChat] Failed to parse AI response:', response.choices[0]?.message?.content?.substring(0, 500));
+        return { success: false, message: 'AI returned invalid response', actions: [] };
+      }
       return {
         success: true,
         message: result.message || 'Design updated.',
@@ -614,9 +661,9 @@ Property: ${address}
 Design Style: ${designStyle || 'naturalistic'}
 Sun Exposure: ${sunExposure || 'full sun'}
 Plant Selections: ${plants?.join(', ') || 'various species'}
-${lighting ? `Landscape Lighting: ${Array.isArray(lighting) ? lighting.join(', ') : 'Included'}` : ''}
-${hardscape ? `Hardscape Notes: ${hardscape}` : ''}
-${specialRequests ? `Special Requests: ${specialRequests}` : ''}
+${lighting ? `Landscape Lighting: ${sanitizeForPrompt(Array.isArray(lighting) ? lighting.join(', ') : String(lighting))}` : ''}
+${hardscape ? `Hardscape Notes: ${sanitizeForPrompt(hardscape)}` : ''}
+${specialRequests ? `Special Requests: ${sanitizeForPrompt(specialRequests)}` : ''}
 
 Write the narrative and closing statement as JSON.`,
           },
@@ -626,7 +673,13 @@ Write the narrative and closing statement as JSON.`,
         temperature: 0.6,
       });
 
-      const result = JSON.parse(response.choices[0].message.content);
+      let result;
+      try {
+        result = JSON.parse(response.choices[0].message.content);
+      } catch (parseErr) {
+        console.error('[AI:generateNarrative] Failed to parse AI response:', response.choices[0]?.message?.content?.substring(0, 500));
+        return { success: false, text: '', closing: '', error: 'AI returned invalid response' };
+      }
       return {
         success: true,
         text: result.narrative || result.text,
@@ -666,7 +719,13 @@ ${typeof content === 'string' ? content.substring(0, 15000) : JSON.stringify(con
         temperature: 0.1,
       });
 
-      const result = JSON.parse(response.choices[0].message.content);
+      let result;
+      try {
+        result = JSON.parse(response.choices[0].message.content);
+      } catch (parseErr) {
+        console.error('[AI:parseNurseryList] Failed to parse AI response:', response.choices[0]?.message?.content?.substring(0, 500));
+        return { success: false, plants: [], error: 'AI returned invalid response' };
+      }
       return {
         success: true,
         plants: result.plants || [],
@@ -732,7 +791,8 @@ ${typeof content === 'string' ? content.substring(0, 15000) : JSON.stringify(con
   async processQueuedJobs(limit = 5) {
     const jobs = await this.db.getMany(
       `SELECT * FROM ai_jobs WHERE status = 'queued' AND attempts < max_attempts
-       ORDER BY priority DESC, created_at ASC LIMIT $1`,
+       ORDER BY priority DESC, created_at ASC LIMIT $1
+       FOR UPDATE SKIP LOCKED`,
       [limit]
     );
 
@@ -749,7 +809,7 @@ ${typeof content === 'string' ? content.substring(0, 15000) : JSON.stringify(con
   async updateDesignStatus(designId, status, error = null) {
     await this.db.query(
       `UPDATE designs SET generation_status = $1, generation_error = $2,
-       generation_completed_at = ${status === 'failed' ? 'NULL' : 'NOW()'}
+       generation_completed_at = CASE WHEN $1 = 'failed' THEN NULL ELSE NOW() END
        WHERE id = $3`,
       [status, error, designId]
     );
@@ -800,7 +860,8 @@ export function mountAIRoutes(app, aiService, authenticate, requireAdmin) {
   // Manual trigger to process queued jobs (admin only, for development/debugging)
   app.post('/api/ai/process-queue', authenticate, requireAdmin, async (req, res) => {
     try {
-      const results = await aiService.processQueuedJobs(req.body.limit || 5);
+      const limit = Math.min(10, Math.max(1, parseInt(req.body.limit, 10) || 5));
+      const results = await aiService.processQueuedJobs(limit);
       res.json({ processed: results.length, results });
     } catch (err) {
       console.error('[ai/process-queue] Error:', err);
@@ -809,7 +870,7 @@ export function mountAIRoutes(app, aiService, authenticate, requireAdmin) {
   });
 
   // Get AI service health
-  app.get('/api/ai/health', async (req, res) => {
+  app.get('/api/ai/health', authenticate, async (req, res) => {
     const checks = {
       openai: !!config.openaiKey,
       replicate: !!config.replicateToken,
