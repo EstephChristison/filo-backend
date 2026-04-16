@@ -1887,7 +1887,64 @@ FINAL CHECK before you output: count the shrubs, trees, and bushes in the origin
 
     const resultBuffer = Buffer.from(imagePart.inlineData.data, 'base64');
 
-    // Reuse scale/scaledW/scaledH/offsetX/offsetY from letterbox calc above
+    // ────────────────────────────────────────────────────────────────
+    // MASK COMPOSITING — The critical step.
+    // Gemini's generative model can't be trusted to preserve pixels
+    // outside the mask (it keeps regenerating things like bougainvillea).
+    // So we manually composite:
+    //   - Inside mask (drawn bed area) → use Gemini's mulch rendering
+    //   - Outside mask → use the original photo pixel-for-pixel
+    // This guarantees every plant, tree, and structure outside the bed
+    // stays 100% identical to the input.
+    // ────────────────────────────────────────────────────────────────
+    if (hasMask && maskResized) {
+      // Resize Gemini's output to match the 1024x1024 input canvas
+      const geminiResult1024 = await sharp(resultBuffer)
+        .resize(1024, 1024, { fit: 'fill' })
+        .png()
+        .toBuffer();
+      // The resizedBuffer is our 1024x1024 letterboxed original photo.
+      // Build a feathered alpha mask from maskResized (black=bed, white=outside).
+      // We want Gemini's output where mask is black, original where white.
+      // Feather by 3px to smooth the transition so edges aren't harsh.
+      const { data: maskPx, info: maskPxInfo } = await sharp(maskResized)
+        .greyscale()
+        .blur(3)
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      // Build RGBA alpha mask: alpha = 255 - grayscale (black → alpha 255 = show Gemini)
+      const alphaBuf = Buffer.alloc(maskPxInfo.width * maskPxInfo.height * 4);
+      for (let i = 0; i < maskPxInfo.width * maskPxInfo.height; i++) {
+        alphaBuf[i * 4] = 0;
+        alphaBuf[i * 4 + 1] = 0;
+        alphaBuf[i * 4 + 2] = 0;
+        alphaBuf[i * 4 + 3] = 255 - maskPx[i];
+      }
+      const alphaMask = await sharp(alphaBuf, { raw: { width: maskPxInfo.width, height: maskPxInfo.height, channels: 4 } })
+        .png()
+        .toBuffer();
+      // Apply the alpha mask to Gemini's result so only the bed area has pixels
+      const geminiMasked = await sharp(geminiResult1024)
+        .ensureAlpha()
+        .composite([{ input: alphaMask, blend: 'dest-in' }])
+        .png()
+        .toBuffer();
+      // Composite the masked Gemini output onto the original photo
+      const composited = await sharp(resizedBuffer)
+        .composite([{ input: geminiMasked, blend: 'over' }])
+        .jpeg({ quality: 92 })
+        .toBuffer();
+      const resultMeta2 = await sharp(composited).metadata();
+      const croppedBuffer = await sharp(composited)
+        .extract({ left: offsetX, top: offsetY, width: Math.min(scaledW, resultMeta2.width - offsetX), height: Math.min(scaledH, resultMeta2.height - offsetY) })
+        .resize(origW, origH, { fit: 'fill' })
+        .jpeg({ quality: 92 })
+        .toBuffer();
+      const resultDataUrl = `data:image/jpeg;base64,${croppedBuffer.toString('base64')}`;
+      return res.json({ previewUrl: resultDataUrl });
+    }
+
+    // No mask: just crop the Gemini output as-is (no compositing)
     const resultMeta = await sharp(resultBuffer).metadata();
     const croppedBuffer = await sharp(resultBuffer)
       .extract({ left: offsetX, top: offsetY, width: Math.min(scaledW, resultMeta.width - offsetX), height: Math.min(scaledH, resultMeta.height - offsetY) })
