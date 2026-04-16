@@ -1769,6 +1769,7 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
     const metadata = await sharp(photoBuffer).metadata();
     const origW = metadata.width;
     const origH = metadata.height;
+    console.log(`[bed-edge] input photo: ${origW}x${origH}, hasMask=${hasMask}, edgeStyle=${edgeStyle}, adjustmentFeet=${adjustmentFeet}`);
 
     const resizedBuffer = await sharp(photoBuffer)
       .resize(1024, 1024, { fit: 'contain', background: { r: 0, g: 0, b: 0 } })
@@ -1783,6 +1784,7 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
     const offsetY = Math.round((1024 - scaledH) / 2);
 
     let maskResized = null;
+    let compositeMask = null; // UNDILATED mask used only for the final composite step
     if (hasMask) {
       const maskB64 = maskDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
       const rawMask = Buffer.from(maskB64, 'base64');
@@ -1797,6 +1799,10 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
         .composite([{ input: maskScaled, left: offsetX, top: offsetY }])
         .png()
         .toBuffer();
+      // Preserve the undilated mask for the composite step so ANY pixel
+      // outside the user's actual drawn polygon is restored from the original
+      // photo. Dilation happens only for the Gemini PROMPT mask, not the composite.
+      compositeMask = maskOnCanvas;
       // Dilate the BLACK bed area by ~15px to compensate for Gemini's natural
       // tendency to render slightly inside the drawn boundary. Blur + threshold
       // causes black pixels to bleed into adjacent white pixels, then re-binarize
@@ -1897,17 +1903,19 @@ FINAL CHECK before you output: count the shrubs, trees, and bushes in the origin
     // This guarantees every plant, tree, and structure outside the bed
     // stays 100% identical to the input.
     // ────────────────────────────────────────────────────────────────
-    if (hasMask && maskResized) {
+    if (hasMask && maskResized && compositeMask) {
       // Resize Gemini's output to match the 1024x1024 input canvas
       const geminiResult1024 = await sharp(resultBuffer)
         .resize(1024, 1024, { fit: 'fill' })
         .png()
         .toBuffer();
       // The resizedBuffer is our 1024x1024 letterboxed original photo.
-      // Build a feathered alpha mask from maskResized (black=bed, white=outside).
+      // Use the UNDILATED compositeMask (black=exactly-where-user-drew, white=outside).
       // We want Gemini's output where mask is black, original where white.
       // Feather by 3px to smooth the transition so edges aren't harsh.
-      const { data: maskPx, info: maskPxInfo } = await sharp(maskResized)
+      // CRITICAL: use compositeMask, NOT maskResized — the latter is dilated 15px
+      // to guide Gemini's prompt, which would swallow plants near the bed edge.
+      const { data: maskPx, info: maskPxInfo } = await sharp(compositeMask)
         .greyscale()
         .blur(3)
         .raw()
