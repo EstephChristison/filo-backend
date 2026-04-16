@@ -13,7 +13,7 @@ const PLAN_CONFIG = {
   BASE_MONTHLY_PRICE: 500_00,        // $500 in cents
   ADDITIONAL_USER_PRICE: 99_00,      // $99 in cents
   INCLUDED_USERS: 3,
-  TRIAL_DAYS: 14,
+  TRIAL_DAYS: 1,
   CURRENCY: 'usd',
   PRODUCT_NAME: 'FILO Professional',
   BASE_PRICE_LOOKUP: 'filo_professional_monthly',

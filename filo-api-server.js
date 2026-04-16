@@ -502,7 +502,7 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
       // Create trial subscription
       await client.query(
         `INSERT INTO subscriptions (company_id, status, trial_end)
-         VALUES ($1, 'trialing', NOW() + INTERVAL '14 days')`,
+         VALUES ($1, 'trialing', NOW() + INTERVAL '1 day')`,
         [companyId]
       );
 
@@ -4711,7 +4711,7 @@ app.post('/api/billing/subscribe', authenticateOnly, requireAdmin, async (req, r
     const subscription = await stripe.subscriptions.create({
       customer: customerId,
       items,
-      trial_period_days: 14,
+      trial_period_days: 1,
       payment_behavior: 'default_incomplete',
       payment_settings: { save_default_payment_method: 'on_subscription' },
       expand: ['latest_invoice.payment_intent'],
@@ -4827,7 +4827,7 @@ app.post('/api/billing/checkout', authenticateOnly, requireAdmin, async (req, re
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
       subscription_data: {
-        trial_period_days: 14,
+        trial_period_days: 1,
         metadata: { filo_company_id: company.id },
       },
       success_url: successUrl || `${process.env.FRONTEND_URL || process.env.APP_URL || 'https://app.myfilocrm.com'}?billing=success`,
@@ -5228,7 +5228,7 @@ app.post('/api/public/checkout', async (req, res) => {
       mode: 'subscription',
       line_items: [{ price: priceId, quantity: 1 }],
       subscription_data: {
-        trial_period_days: 14,
+        trial_period_days: 1,
         metadata: { source: 'landing_page', company_name: companyName || '' },
       },
       success_url: successUrl || `${process.env.FRONTEND_URL || 'https://app.myfilocrm.com'}?billing=success`,
