@@ -1808,21 +1808,45 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
       const maskRGBA = await sharp(maskResized)
         .ensureAlpha()
         .toBuffer();
-      // Invert: black (bed area) → bright orange overlay, white (outside) → transparent
+      // Invert: black (bed area) → bright magenta overlay (fully opaque fill + solid outline)
+      // Use MAGENTA (#FF00FF) — most distinctive color vs typical landscape (greens, browns, grays)
       const { data: maskPixels, info: maskInfo } = await sharp(maskRGBA).raw().toBuffer({ resolveWithObject: true });
       const overlayPixels = Buffer.alloc(maskInfo.width * maskInfo.height * 4);
-      for (let i = 0; i < maskInfo.width * maskInfo.height; i++) {
-        const r = maskPixels[i * 4];
-        const g = maskPixels[i * 4 + 1];
-        const b = maskPixels[i * 4 + 2];
-        const isBed = (r < 128 && g < 128 && b < 128); // black = bed area
-        if (isBed) {
-          overlayPixels[i * 4] = 255;     // R — bright orange/red
-          overlayPixels[i * 4 + 1] = 100; // G
-          overlayPixels[i * 4 + 2] = 0;   // B
-          overlayPixels[i * 4 + 3] = 80;  // A — semi-transparent
-        } else {
-          overlayPixels[i * 4 + 3] = 0;   // fully transparent
+      const W = maskInfo.width;
+      const H = maskInfo.height;
+      const isBedAt = (x, y) => {
+        if (x < 0 || x >= W || y < 0 || y >= H) return false;
+        const idx = (y * W + x) * 4;
+        return maskPixels[idx] < 128 && maskPixels[idx + 1] < 128 && maskPixels[idx + 2] < 128;
+      };
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const i = y * W + x;
+          const bed = isBedAt(x, y);
+          if (bed) {
+            // Detect edge pixels: this pixel is bed, but a neighbor within 3px is not
+            let isEdge = false;
+            for (let dx = -3; dx <= 3 && !isEdge; dx++) {
+              for (let dy = -3; dy <= 3 && !isEdge; dy++) {
+                if (!isBedAt(x + dx, y + dy)) isEdge = true;
+              }
+            }
+            if (isEdge) {
+              // Edge: solid opaque magenta border
+              overlayPixels[i * 4] = 255;
+              overlayPixels[i * 4 + 1] = 0;
+              overlayPixels[i * 4 + 2] = 255;
+              overlayPixels[i * 4 + 3] = 255;
+            } else {
+              // Interior: 50% magenta fill so photo still visible but area is unmistakable
+              overlayPixels[i * 4] = 255;
+              overlayPixels[i * 4 + 1] = 0;
+              overlayPixels[i * 4 + 2] = 255;
+              overlayPixels[i * 4 + 3] = 140;
+            }
+          } else {
+            overlayPixels[i * 4 + 3] = 0;
+          }
         }
       }
       const overlayBuffer = await sharp(overlayPixels, { raw: { width: maskInfo.width, height: maskInfo.height, channels: 4 } })
@@ -1861,27 +1885,37 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
         { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
       );
     }
-    promptParts.push({ text: `⚠️ THIS IS A BED EDGE RESHAPING TASK ONLY. You are ONLY changing the border/boundary line where the mulch bed meets the lawn.
+    promptParts.push({ text: `TASK: Reshape the mulch bed boundary in the property photo.
 
-${hasMask ? `THE ORANGE SHADED AREA IN THE ANNOTATED PHOTO SHOWS THE NEW BED PERIMETER:
-The orange/red overlay outlines where the new bed EDGE should be. The outer edge of the orange area = the new bed-to-lawn transition line.
-- Use the CLEAN photo as the base (no orange overlay in the result)
-- Reshape ONLY the bed-to-lawn boundary to match the drawn perimeter
-- Where the new boundary extends beyond the current bed, replace ONLY the grass in that strip with mulch
-- Where the new boundary is smaller than the current bed, replace ONLY the mulch in that strip with grass` : 'Reshape the EXISTING landscape bed edge visible in the photo.'}
+${hasMask ? `THE MAGENTA-OUTLINED AREA IN THE ANNOTATED PHOTO DEFINES THE NEW MULCH BED:
+- The bright magenta (pink) outline shows the EXACT new bed perimeter the user wants.
+- EVERYTHING INSIDE the magenta outline should be mulch (dark brown shredded bark, natural texture) in the output.
+- EVERYTHING OUTSIDE the magenta outline should be whatever was there before (grass stays grass, driveway stays driveway, etc.).
+- Output the CLEAN photo (no magenta overlay visible in result), just with the mulch bed reshaped to match.
 
-⛔⛔⛔ ABSOLUTE RULE — ZERO PLANT CHANGES ⛔⛔⛔
-Every single plant, shrub, tree, vine, flower, and piece of vegetation visible in the photo MUST remain EXACTLY as-is — same position, same size, same color, same shape. Do NOT remove, add, move, resize, recolor, or alter ANY plant in ANY way. Plants that are inside the bed stay inside the bed. Plants on the wall stay on the wall. This is NON-NEGOTIABLE.
+IF THE NEW BED AREA EXTENDS INTO WHAT IS CURRENTLY GRASS/LAWN:
+YES — replace that grass with fresh mulch. Converting lawn to mulch bed is the WHOLE POINT of this task. Grass is NOT a plant we are preserving; it is a surface material being swapped for mulch where the new bed expands.
 
-BED EDGE RULES:
-1. Edge style: ${edgeDesc}
-2. ${adjustDesc}
-3. ONLY modify the narrow strip where bed meets lawn — the transition line. Existing mulch areas stay as mulch. Existing lawn areas outside the new boundary stay as lawn.
-4. ⛔ DO NOT add any edging material, plastic edging, steel edging, metal edging, stone edging, brick edging, concrete curb, landscape border, or any physical border object. ⛔
-5. The edge should look like a freshly spade-cut trench edge — a natural, clean soil transition where mulch meets grass. It is JUST dark brown mulch ending and green grass beginning. NO black line, NO dark strip, NO physical border of any kind along the edge. The edge is simply the boundary between two materials (mulch and grass), nothing more.
-6. DO NOT modify the house, driveway, sidewalk, fence, or any structure.
-7. ALL existing plants, shrubs, trees, and vegetation must remain PIXEL-IDENTICAL. The ONLY change is the shape of the mulch bed itself — the mulch area grows or shrinks to match the drawn boundary, and grass fills the rest.
-8. The result must look like a real photograph with natural lighting and shadows.` });
+IF THE NEW BED AREA IS SMALLER THAN THE CURRENT BED:
+Replace the now-excluded mulch strip with matching grass/lawn.` : 'Reshape the EXISTING landscape bed edge visible in the photo.'}
+
+PRESERVATION RULES (what STAYS pixel-identical):
+- Every SHRUB, TREE, BUSH, FLOWER, and WOODY PLANT visible in the photo: keep in exact same position, size, and color.
+- The HOUSE, WALLS, ROOF, WINDOWS, DOORS, DRIVEWAY, SIDEWALK, FENCE, and any structures: unchanged.
+- Areas of grass OUTSIDE the new bed perimeter: stay grass.
+- Areas of mulch OUTSIDE the new bed perimeter: these become grass if the new bed is smaller.
+- ⚠️ IMPORTANT: Grass/lawn INSIDE the new bed perimeter is NOT a "plant to preserve" — it is a surface that gets replaced with mulch. Do not refuse to convert it.
+
+EDGE STYLE:
+${edgeDesc}
+
+SIZE ADJUSTMENT:
+${adjustDesc}
+
+FINISHING:
+- Edge transition: clean, crisp, professionally cut steel-edge line with a slight trench reveal. Sharp and defined.
+- Natural lighting, shadows, and photographic realism.
+- Output ONLY the edited photo (no overlay, no text, no annotations in the result).` });
 
 
     let response;
