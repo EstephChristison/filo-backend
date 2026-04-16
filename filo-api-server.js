@@ -1818,11 +1818,17 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
         { inlineData: { mimeType: 'image/jpeg', data: resizedBuffer.toString('base64') } },
         { text: 'Here is a mask image. BLACK areas = new mulch bed. WHITE areas = keep original photo unchanged.' },
         { inlineData: { mimeType: 'image/png', data: maskResized.toString('base64') } },
-        { text: `STRICT EDIT RULES — BED BOUNDARY ONLY:
+        { text: `⛔⛔⛔ ABSOLUTE RULE #0 — ZERO PLANTS CHANGE ⛔⛔⛔
+Every single plant, shrub, tree, bush, flower, vine, and piece of vegetation that is visible in the original photo MUST remain in the output — EXACTLY as-is. Same position, same size, same color, same shape, same foliage. Do not remove, add, move, shrink, enlarge, recolor, or replace ANY plant. This rule applies to plants in BOTH the black and white mask areas. Plants are UNTOUCHABLE. If you are tempted to remove a plant to "clean up" a mulch area — DO NOT. Keep it.
 
-1. WHITE MASK AREAS: Every pixel where the mask is WHITE must remain IDENTICAL to the original photo. Zero changes. Grass stays grass, house stays house, plants stay plants, every shrub/tree/bush keeps its exact position and color.
+NOW, THE GROUND-LEVEL EDIT (this is the ONLY thing you are changing):
 
-2. BLACK MASK AREAS: This is where the NEW mulch bed goes. Convert this entire area to natural dark brown shredded bark mulch (deep brown, slightly coarse texture, realistic shadows). If there is grass in this area currently, replace it with mulch. If there is already mulch, keep it as mulch. If there are existing shrubs/trees inside this black area, KEEP the shrubs/trees but change the ground around them from grass to mulch.
+1. WHITE MASK AREAS: Every pixel where the mask is WHITE stays IDENTICAL to the original photo. No changes at all.
+
+2. BLACK MASK AREAS: The GROUND SURFACE ONLY changes to dark brown shredded bark mulch. Think of it like this: the plants/trees/shrubs stay EXACTLY where they are, and you're just swapping out the grass underneath and around them with mulch. You are NOT replacing the plants — only the grass/dirt below them.
+   - Grass in black area → replace with mulch
+   - Existing mulch in black area → keep as mulch
+   - PLANTS in black area → KEEP THEM. Just put mulch around their base instead of grass.
 
 3. EDGE STYLE: ${edgeDesc}
 
@@ -1830,11 +1836,11 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
 
 5. BED EDGE FINISH: Where black meets white (the transition line), render a clean professional steel-edge with a slight trench reveal. Sharp and defined.
 
-6. DO NOT add, remove, resize, or move any plants, shrubs, trees, flowers, or bushes. Only the ground surface (grass↔mulch) and the edge line change.
+6. DO NOT modify the house, roof, windows, doors, driveway, sidewalk, fence, vehicles, or any structure.
 
-7. DO NOT modify the house, roof, windows, doors, driveway, sidewalk, fence, vehicles, or any structure.
+7. Output must look like a real photograph. Natural lighting, shadows, and colors matching the original.
 
-8. Output must look like a real photograph. Natural lighting, shadows, and colors matching the original.` }
+FINAL CHECK before you output: count the shrubs, trees, and bushes in the original photo. Your output MUST have the exact same number in the exact same places.` }
       );
     } else {
       promptParts.push(
