@@ -1877,10 +1877,11 @@ BED EDGE RULES:
 1. Edge style: ${edgeDesc}
 2. ${adjustDesc}
 3. ONLY modify the narrow strip where bed meets lawn — the transition line. Existing mulch areas stay as mulch. Existing lawn areas outside the new boundary stay as lawn.
-4. The edge transition: clean, crisp, professionally cut steel-edge line with a slight trench reveal. Sharp and defined.
-5. DO NOT modify the house, driveway, sidewalk, fence, or any structure.
-6. ALL existing plants, shrubs, trees, and vegetation must remain PIXEL-IDENTICAL. The ONLY change is the edge line and any thin strip of new mulch or grass at the boundary.
-7. The result must look like a real photograph with natural lighting and shadows.` });
+4. ⛔ DO NOT add any edging material, plastic edging, steel edging, metal edging, stone edging, brick edging, concrete curb, landscape border, or any physical border object. ⛔
+5. The edge should look like a freshly spade-cut trench edge — a natural, clean soil transition where mulch meets grass. It is JUST dark brown mulch ending and green grass beginning. NO black line, NO dark strip, NO physical border of any kind along the edge. The edge is simply the boundary between two materials (mulch and grass), nothing more.
+6. DO NOT modify the house, driveway, sidewalk, fence, or any structure.
+7. ALL existing plants, shrubs, trees, and vegetation must remain PIXEL-IDENTICAL. The ONLY change is the shape of the mulch bed itself — the mulch area grows or shrinks to match the drawn boundary, and grass fills the rest.
+8. The result must look like a real photograph with natural lighting and shadows.` });
 
 
     let response;
