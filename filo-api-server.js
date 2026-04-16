@@ -73,7 +73,7 @@ const config = {
   },
   resend: {
     apiKey: process.env.RESEND_API_KEY,
-    from: process.env.EMAIL_FROM || 'FILO <noreply@myfilocrm.com>',
+    from: process.env.EMAIL_FROM || 'FILO <noreply@getfilocrm.com>',
   },
 };
 
@@ -319,8 +319,8 @@ app.use(helmet({
   hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
 }));
 const PROD_ORIGINS = [
-  'https://app.myfilocrm.com',
-  'https://myfilocrm.com',
+  'https://app.getfilocrm.com',
+  'https://getfilocrm.com',
   'https://filo-app-five.vercel.app',
   'https://filo-app-estephchristisons-projects.vercel.app',
 ];
@@ -663,7 +663,7 @@ app.post('/api/auth/invite', authenticateOnly, requireAdmin, async (req, res) =>
       [req.user.companyId, email, tempPassword, firstName, lastName, role || 'estimator', inviteToken]
     );
 
-    const inviteLink = `${process.env.FRONTEND_URL || 'https://app.myfilocrm.com'}/invite/${inviteToken}`;
+    const inviteLink = `${process.env.FRONTEND_URL || 'https://app.getfilocrm.com'}/invite/${inviteToken}`;
     const inviterUser = await db.getOne('SELECT first_name, last_name FROM users WHERE id = $1', [req.user.userId]);
     const company = await db.getOne('SELECT name FROM companies WHERE id = $1', [req.user.companyId]);
     await sendEmail(email, `You're invited to ${company?.name || 'FILO'}`, `
@@ -743,7 +743,7 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
         'UPDATE users SET recovery_token = $1, recovery_sent_at = $2 WHERE id = $3',
         [token, expires, user.id]
       );
-      const resetLink = `${process.env.FRONTEND_URL || 'https://app.myfilocrm.com'}/reset-password/${token}`;
+      const resetLink = `${process.env.FRONTEND_URL || 'https://app.getfilocrm.com'}/reset-password/${token}`;
       await sendEmail(user.email, 'Reset your FILO password', `
         <h2>Password Reset</h2>
         <p>Click the link below to reset your password. This link expires in 1 hour.</p>
@@ -4747,7 +4747,7 @@ app.post('/api/billing/portal', authenticateOnly, requireAdmin, async (req, res)
 
     const session = await stripe.billingPortal.sessions.create({
       customer: company.stripe_customer_id,
-      return_url: returnUrl || process.env.FRONTEND_URL || process.env.APP_URL || 'https://app.myfilocrm.com',
+      return_url: returnUrl || process.env.FRONTEND_URL || process.env.APP_URL || 'https://app.getfilocrm.com',
     });
     res.json({ url: session.url });
   } catch (err) {
@@ -4830,8 +4830,8 @@ app.post('/api/billing/checkout', authenticateOnly, requireAdmin, async (req, re
         trial_period_days: 1,
         metadata: { filo_company_id: company.id },
       },
-      success_url: successUrl || `${process.env.FRONTEND_URL || process.env.APP_URL || 'https://app.myfilocrm.com'}?billing=success`,
-      cancel_url: cancelUrl || `${process.env.FRONTEND_URL || process.env.APP_URL || 'https://app.myfilocrm.com'}?billing=cancel`,
+      success_url: successUrl || `${process.env.FRONTEND_URL || process.env.APP_URL || 'https://app.getfilocrm.com'}?billing=success`,
+      cancel_url: cancelUrl || `${process.env.FRONTEND_URL || process.env.APP_URL || 'https://app.getfilocrm.com'}?billing=cancel`,
     });
 
     res.json({ sessionId: session.id, url: session.url });
@@ -5231,8 +5231,8 @@ app.post('/api/public/checkout', async (req, res) => {
         trial_period_days: 1,
         metadata: { source: 'landing_page', company_name: companyName || '' },
       },
-      success_url: successUrl || `${process.env.FRONTEND_URL || 'https://app.myfilocrm.com'}?billing=success`,
-      cancel_url: cancelUrl || `${process.env.APP_URL || 'https://myfilocrm.com'}`,
+      success_url: successUrl || `${process.env.FRONTEND_URL || 'https://app.getfilocrm.com'}?billing=success`,
+      cancel_url: cancelUrl || `${process.env.APP_URL || 'https://getfilocrm.com'}`,
     });
 
     res.json({ sessionId: session.id, url: session.url });
@@ -5406,7 +5406,7 @@ const OPTIONAL_ENV = [
   ['GPT_MODEL', 'OpenAI model override — defaults to gpt-4o'],
   ['GOOGLE_AI_API_KEY', 'Google Gemini API key — plant detection and analysis routes will return 503'],
   ['FRONTEND_URL', 'Frontend URL for CORS and invite links — defaults to http://localhost:3000'],
-  ['APP_URL', 'Application URL for Stripe redirects — defaults to https://app.myfilocrm.com'],
+  ['APP_URL', 'Application URL for Stripe redirects — defaults to https://app.getfilocrm.com'],
 ];
 for (const [key, note] of OPTIONAL_ENV) {
   if (!process.env[key]) console.warn(`ℹ️  Optional env not set: ${key} — ${note}`);
