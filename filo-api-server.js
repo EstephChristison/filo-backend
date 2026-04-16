@@ -1791,10 +1791,19 @@ app.post('/api/bed-edge-preview', authenticate, aiRateLimit, async (req, res) =>
         .resize(scaledW, scaledH, { fit: 'fill' })
         .png()
         .toBuffer();
-      maskResized = await sharp({
+      const maskOnCanvas = await sharp({
         create: { width: 1024, height: 1024, channels: 3, background: { r: 255, g: 255, b: 255 } }
       })
         .composite([{ input: maskScaled, left: offsetX, top: offsetY }])
+        .png()
+        .toBuffer();
+      // Dilate the BLACK bed area by ~15px to compensate for Gemini's natural
+      // tendency to render slightly inside the drawn boundary. Blur + threshold
+      // causes black pixels to bleed into adjacent white pixels, then re-binarize
+      // at a higher cutoff to capture that bleed as new black area.
+      maskResized = await sharp(maskOnCanvas)
+        .blur(8)
+        .threshold(200, { grayscale: false })
         .png()
         .toBuffer();
     }
