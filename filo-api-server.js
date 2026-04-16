@@ -271,6 +271,7 @@ function formatUserResponse(user) {
     companyName: user.company_name || user.companyName || null,
     onboardingCompleted: user.onboarding_completed ?? user.onboardingCompleted ?? false,
     phone: user.phone || null,
+    is_super_admin: user.is_super_admin ?? false,
   };
 }
 
@@ -4081,6 +4082,200 @@ app.delete('/api/team/:userId', authenticateOnly, requireAdmin, async (req, res)
   } catch (err) {
     console.error('DELETE /api/team/:userId error:', err.message);
     res.status(500).json({ error: 'Failed to deactivate user' });
+  }
+});
+
+// ─── Super Admin (Developer Portal) ──────────────────────────────
+// Middleware: require is_super_admin flag on the user
+async function requireSuperAdmin(req, res, next) {
+  try {
+    const user = await db.getOne(
+      'SELECT is_super_admin FROM users WHERE id = $1',
+      [req.user.userId]
+    );
+    if (!user || !user.is_super_admin) {
+      return res.status(403).json({ error: 'Super admin access required' });
+    }
+    next();
+  } catch (err) {
+    console.error('requireSuperAdmin error:', err.message);
+    res.status(500).json({ error: 'Authorization check failed' });
+  }
+}
+
+// Overall platform stats
+app.get('/api/admin/stats', authenticateOnly, requireSuperAdmin, async (req, res) => {
+  try {
+    const [companies, users, projects, estimates, subs, activeSubs, trialingSubs, lockedSubs] = await Promise.all([
+      db.getOne('SELECT COUNT(*) as c FROM companies'),
+      db.getOne('SELECT COUNT(*) as c FROM users WHERE is_active = true'),
+      db.getOne('SELECT COUNT(*) as c FROM projects'),
+      db.getOne('SELECT COUNT(*) as c FROM estimates'),
+      db.getOne('SELECT COUNT(*) as c FROM subscriptions'),
+      db.getOne("SELECT COUNT(*) as c FROM subscriptions WHERE status = 'active'"),
+      db.getOne("SELECT COUNT(*) as c FROM subscriptions WHERE status = 'trialing'"),
+      db.getOne("SELECT COUNT(*) as c FROM subscriptions WHERE status IN ('canceled','locked','past_due')"),
+    ]);
+    const mrr = await db.getOne(
+      "SELECT COALESCE(SUM(base_amount + additional_users * additional_user_amount), 0) as mrr FROM subscriptions WHERE status IN ('active','trialing')"
+    );
+    res.json({
+      companies: parseInt(companies.c),
+      users: parseInt(users.c),
+      projects: parseInt(projects.c),
+      estimates: parseInt(estimates.c),
+      subscriptions: { total: parseInt(subs.c), active: parseInt(activeSubs.c), trialing: parseInt(trialingSubs.c), locked: parseInt(lockedSubs.c) },
+      mrr: parseFloat(mrr.mrr),
+    });
+  } catch (err) {
+    console.error('GET /api/admin/stats error:', err.message);
+    res.status(500).json({ error: 'Failed to load stats' });
+  }
+});
+
+// List all companies with subscription + usage stats
+app.get('/api/admin/companies', authenticateOnly, requireSuperAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const offset = parseInt(req.query.offset) || 0;
+    const search = (req.query.search || '').trim();
+    let sql = 'SELECT * FROM v_admin_companies';
+    const params = [];
+    if (search) {
+      sql += ' WHERE name ILIKE $1 OR email ILIKE $1';
+      params.push(`%${search}%`);
+    }
+    sql += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+    const rows = await db.getMany(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /api/admin/companies error:', err.message);
+    res.status(500).json({ error: 'Failed to load companies' });
+  }
+});
+
+// Get detailed info for a single company
+app.get('/api/admin/companies/:companyId', authenticateOnly, requireSuperAdmin, async (req, res) => {
+  try {
+    const company = await db.getOne('SELECT * FROM companies WHERE id = $1', [req.params.companyId]);
+    if (!company) return res.status(404).json({ error: 'Company not found' });
+    const [users, subscription, projectCount, estimateCount, recentActivity] = await Promise.all([
+      db.getMany('SELECT id, email, first_name, last_name, role, is_active, is_super_admin, created_at FROM users WHERE company_id = $1 ORDER BY created_at ASC', [req.params.companyId]),
+      db.getOne('SELECT * FROM subscriptions WHERE company_id = $1 ORDER BY created_at DESC LIMIT 1', [req.params.companyId]),
+      db.getOne('SELECT COUNT(*) as c FROM projects WHERE company_id = $1', [req.params.companyId]),
+      db.getOne('SELECT COUNT(*) as c FROM estimates WHERE company_id = $1', [req.params.companyId]),
+      db.getMany('SELECT a.*, u.email FROM activity_log a LEFT JOIN users u ON u.id = a.user_id WHERE a.company_id = $1 ORDER BY a.created_at DESC LIMIT 25', [req.params.companyId]),
+    ]);
+    res.json({
+      company,
+      users,
+      subscription,
+      projectCount: parseInt(projectCount.c),
+      estimateCount: parseInt(estimateCount.c),
+      recentActivity,
+    });
+  } catch (err) {
+    console.error('GET /api/admin/companies/:id error:', err.message);
+    res.status(500).json({ error: 'Failed to load company details' });
+  }
+});
+
+// List all users across all companies
+app.get('/api/admin/users', authenticateOnly, requireSuperAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const offset = parseInt(req.query.offset) || 0;
+    const search = (req.query.search || '').trim();
+    let sql = `SELECT u.id, u.email, u.first_name, u.last_name, u.role, u.is_active, u.is_super_admin,
+               u.created_at, u.last_login_at, c.name as company_name, c.id as company_id
+               FROM users u LEFT JOIN companies c ON c.id = u.company_id`;
+    const params = [];
+    if (search) {
+      sql += ' WHERE u.email ILIKE $1 OR u.first_name ILIKE $1 OR u.last_name ILIKE $1 OR c.name ILIKE $1';
+      params.push(`%${search}%`);
+    }
+    sql += ` ORDER BY u.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+    const rows = await db.getMany(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /api/admin/users error:', err.message);
+    res.status(500).json({ error: 'Failed to load users' });
+  }
+});
+
+// Trigger a password reset for any user (admin-initiated)
+app.post('/api/admin/users/:userId/reset-password', authenticateOnly, requireSuperAdmin, async (req, res) => {
+  try {
+    const user = await db.getOne('SELECT id, email, first_name FROM users WHERE id = $1', [req.params.userId]);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    const token = crypto.randomBytes(32).toString('hex');
+    await db.query(
+      "UPDATE users SET recovery_token = $1, recovery_sent_at = NOW() WHERE id = $2",
+      [token, user.id]
+    );
+    const resetLink = `${process.env.FRONTEND_URL || 'https://app.getfilocrm.com'}/reset-password/${token}`;
+    await sendEmail(
+      user.email,
+      'FILO — Password Reset',
+      `<p>Hi ${user.first_name || 'there'},</p>
+       <p>An administrator has initiated a password reset for your FILO account. Click the link below to set a new password (expires in 1 hour):</p>
+       <p><a href="${resetLink}">${resetLink}</a></p>
+       <p>If you did not request this, please contact support@getfilocrm.com.</p>`
+    );
+    res.json({ message: 'Reset email sent', email: user.email });
+  } catch (err) {
+    console.error('POST /api/admin/users/:id/reset-password error:', err.message);
+    res.status(500).json({ error: 'Failed to send reset email' });
+  }
+});
+
+// Unlock a company's subscription (useful for support escalations)
+app.post('/api/admin/companies/:companyId/unlock', authenticateOnly, requireSuperAdmin, async (req, res) => {
+  try {
+    const result = await db.query(
+      "UPDATE subscriptions SET status = 'active' WHERE company_id = $1 AND status IN ('locked','past_due','canceled')",
+      [req.params.companyId]
+    );
+    res.json({ message: 'Subscription unlocked', rowsAffected: result.rowCount });
+  } catch (err) {
+    console.error('POST /api/admin/companies/:id/unlock error:', err.message);
+    res.status(500).json({ error: 'Failed to unlock subscription' });
+  }
+});
+
+// Recent activity across all companies
+app.get('/api/admin/activity', authenticateOnly, requireSuperAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const rows = await db.getMany(
+      `SELECT a.*, u.email as user_email, c.name as company_name
+       FROM activity_log a
+       LEFT JOIN users u ON u.id = a.user_id
+       LEFT JOIN companies c ON c.id = a.company_id
+       ORDER BY a.created_at DESC LIMIT $1`,
+      [limit]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /api/admin/activity error:', err.message);
+    res.status(500).json({ error: 'Failed to load activity' });
+  }
+});
+
+// Recent Stripe webhook events
+app.get('/api/admin/webhook-events', authenticateOnly, requireSuperAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    const rows = await db.getMany(
+      'SELECT id, source, event_type, event_id, processed, processed_at, error, created_at FROM webhook_events ORDER BY created_at DESC LIMIT $1',
+      [limit]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('GET /api/admin/webhook-events error:', err.message);
+    res.status(500).json({ error: 'Failed to load webhook events' });
   }
 });
 
