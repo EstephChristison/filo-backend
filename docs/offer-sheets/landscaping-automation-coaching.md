@@ -1,4 +1,4 @@
-# FILO Automation Coaching — Offer Sheet
+# FILO Coaching — Offer Sheet
 
 > Source content for the offer sheet. The print-ready version is
 > `landscaping-automation-coaching.html` (open in a browser and print to PDF,
@@ -9,80 +9,88 @@
 
 ## Masthead
 
-**FILO** · Automation Coaching for Landscaping Businesses
+**FILO Coaching** · Business Coaching for Landscaping Companies
 
-**Run your landscaping business on autopilot — without losing the personal touch.**
+**Build a landscaping business that runs without you.**
 
-A 90-day coaching program that installs the systems, software, and habits that
-let owners get out of the office and back to the work (and life) they actually
-want.
+One-on-one business coaching for landscaping company owners — delivered over
+Zoom and email, so you get expert guidance without leaving the field.
 
 ## The problem we solve
 
-Most landscaping companies lose jobs — and evenings — to manual busywork:
+Most landscaping companies lose jobs — and evenings — to the same patterns:
 
 - **Slow quotes lose jobs.** Prospects sign with whoever gets a professional
   proposal in front of them first. Hand-built quotes take days.
 - **Follow-ups slip.** Leads go cold in the inbox. No system means no second
   touch, and no second touch means no sale.
-- **The owner is the bottleneck.** Designs, invoices, scheduling, chasing
+- **The owner is the bottleneck.** Quotes, invoices, scheduling, chasing
   payments — everything routes through one person's phone.
 
-## What we automate together
+## What we coach you on
 
-1. **Lead intake & follow-up** — Every inquiry captured in one pipeline, with
-   automatic follow-up sequences so no lead goes cold.
-2. **AI design & proposals** — Photo-to-render AI designs and white-labeled,
-   client-ready submittal packages (design narrative, rendering, plant
-   selections) generated in minutes, not days.
-3. **Quoting & payments** — Professional quotes, deposits, and recurring
-   billing handled through Stripe — no more chasing checks.
-4. **Client communication** — Templated updates, review requests, and
-   seasonal re-engagement campaigns that run themselves.
-5. **Numbers you can act on** — A simple weekly dashboard: leads, close rate,
-   average job value, revenue — so you steer with data, not gut feel.
+1. **Pricing & quoting** — Price for profit, quote fast, and stop competing
+   on being the cheapest bid.
+2. **Sales pipeline & follow-up** — A simple system so every lead gets a
+   first touch, a second touch, and a close — automatically.
+3. **Systems & automation** — Turn the busywork (intake, reminders,
+   invoicing, reviews) into processes that run themselves.
+4. **Team & delegation** — Get work off the owner's plate: hiring, training
+   checklists, and who-does-what clarity.
+5. **Numbers that matter** — Leads, close rate, average job value, revenue —
+   reviewed together so you steer with data, not gut feel.
 
-## The 90-day roadmap
+## How coaching works
+
+All correspondence happens over Zoom and email — no travel, no office visits,
+no software to learn.
+
+- **Zoom coaching sessions.** Scheduled video calls at a cadence that fits
+  your package. Every session has an agenda, ends with clear action items,
+  and is recorded so you can rewatch anytime.
+- **Email correspondence between sessions.** Stuck on a quote? Drafting a
+  tough client email? Send it over — you get a considered reply within one
+  business day. *(editable)*
+- **Action items, not homework.** After each call you get a short written
+  recap: what we decided, what you're doing next, what we'll review.
+
+## Your first 90 days
 
 | Phase | Days | What happens |
 |---|---|---|
-| **Audit** | 1–14 | Map your current sales-to-invoice flow, find the leaks, set baseline numbers. |
-| **Build** | 15–45 | Stand up your pipeline, AI design workflow, proposal templates, and billing — together, on weekly calls. |
-| **Automate & coach** | 46–90 | Turn on the follow-up sequences, train your team, tune the numbers weekly until it runs without you. |
+| **Diagnose** | 1–14 | Kickoff Zoom session. We map how work flows through your business today, find the leaks, and set baseline numbers. |
+| **Fix the big leaks** | 15–45 | Sessions focus on the highest-payoff changes first — usually pricing, quoting speed, and follow-up. |
+| **Systemize** | 46–90 | Build the routines and delegation so the improvements stick — and keep sticking after coaching ends. |
 
 ## What's included
 
-- Weekly 1:1 coaching calls (12 sessions)
-- Full FILO platform setup, branded to your company
-- Done-with-you automation builds (intake, follow-up, billing)
-- Proposal & submittal templates in your branding
-- Team training session + recorded playbooks
-- Weekly KPI dashboard review
-- Email/text support between calls
+- Regular one-on-one Zoom coaching sessions (cadence per package)
+- Email correspondence between sessions
+- Session recordings and written recaps after every call
+- Templates: quotes, follow-up emails, hiring checklists
+- Monthly numbers review (leads, close rate, job value, revenue)
+- A coach who only works with landscaping businesses
 
 ## Packages *(editable pricing)*
 
-| | **Foundations** | **Growth Engine** ⭐ | **Full Autopilot** |
+| | **Email Coaching** | **Core Coaching** ⭐ | **Intensive** |
 |---|---|---|---|
-| Price | $1,500 one-time | $4,500 / 90 days | $9,500 / 90 days |
-| Automation audit & roadmap | ✓ | ✓ | ✓ |
-| FILO setup & branding | ✓ | ✓ | ✓ |
-| Weekly 1:1 coaching | — | ✓ (12 calls) | ✓ (12 calls) |
-| Done-with-you automation builds | — | ✓ | ✓ |
-| Done-**for**-you builds & templates | — | — | ✓ |
-| Team training & playbooks | — | ✓ | ✓ |
-| 90 days post-program support | — | — | ✓ |
+| Price | $495/mo | $1,250/mo | $2,500/mo |
+| Email correspondence | ✓ | ✓ | ✓ priority (same-day) |
+| Zoom sessions | — | 2 per month | Weekly |
+| Written recaps & recordings | ✓ monthly review letter | ✓ | ✓ |
+| Templates library | ✓ | ✓ | ✓ |
+| Monthly numbers review | — | ✓ | ✓ |
+| Quarterly planning session | — | — | ✓ |
 
-**Software:** the FILO Professional platform is $500/mo (includes 3 users;
-$99/mo per additional user) and is billed separately. Coaching clients get
-their first month free. *(editable)*
+Month-to-month, cancel anytime. *(editable)*
 
 ## Guarantee
 
-If we haven't cut your quote turnaround time in half by day 90, we keep
-coaching free until we do.
+If you don't see a measurable improvement in your close rate or quote
+turnaround within 90 days, your next month of coaching is free.
 
 ## Call to action
 
-**Book a free 30-minute automation audit.**
+**Book a free 30-minute Zoom consultation.**
 Esteph Christison · esteph@getfilocrm.com · getfilocrm.com
