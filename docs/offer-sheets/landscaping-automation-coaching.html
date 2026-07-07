@@ -1,0 +1,316 @@
+<title>FILO Coaching — Offer Sheet</title>
+<style>
+  :root {
+    --ink: #1a3a2a;
+    --accent: #2d6a4f;
+    --paper: #fafaf7;
+    --card: #ffffff;
+    --muted: #5c6b61;
+    --rule: #c9d6cc;
+    --tint: #e8f0ea;
+    --masthead-ink: #f2f6f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #d9e6dd;
+      --accent: #7dbb9a;
+      --paper: #131a15;
+      --card: #1a241d;
+      --muted: #93a598;
+      --rule: #2e3d33;
+      --tint: #223529;
+      --masthead-ink: #f2f6f3;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #d9e6dd;
+    --accent: #7dbb9a;
+    --paper: #131a15;
+    --card: #1a241d;
+    --muted: #93a598;
+    --rule: #2e3d33;
+    --tint: #223529;
+    --masthead-ink: #f2f6f3;
+  }
+  :root[data-theme="light"] {
+    --ink: #1a3a2a;
+    --accent: #2d6a4f;
+    --paper: #fafaf7;
+    --card: #ffffff;
+    --muted: #5c6b61;
+    --rule: #c9d6cc;
+    --tint: #e8f0ea;
+    --masthead-ink: #f2f6f3;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    margin: 0;
+    padding: 2rem 1rem;
+  }
+  .sheet {
+    max-width: 51rem;
+    margin: 0 auto;
+    background: var(--card);
+    border: 1px solid var(--rule);
+    box-shadow: 0 2px 24px rgba(26, 58, 42, 0.08);
+  }
+
+  /* ── Masthead ── */
+  .masthead {
+    background: #1a3a2a;
+    color: var(--masthead-ink);
+    padding: 2.5rem 3rem 2.25rem;
+  }
+  .masthead .brandline {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 1.75rem;
+  }
+  .wordmark {
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: 0.32em;
+  }
+  .brandline .service {
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: #a8c5b4;
+  }
+  .masthead h1 {
+    font-size: clamp(1.6rem, 4vw, 2.3rem);
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    line-height: 1.15;
+    margin: 0 0 0.75rem;
+    text-wrap: balance;
+  }
+  .masthead .dek {
+    font-size: 1rem;
+    color: #c4d8cb;
+    max-width: 38rem;
+    margin: 0;
+  }
+
+  /* ── Body sections ── */
+  .body { padding: 2.25rem 3rem 2.5rem; display: flex; flex-direction: column; gap: 2rem; }
+  section h2 {
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 0.35rem;
+  }
+  section h2::after {
+    content: "";
+    display: block;
+    height: 2px;
+    background: var(--rule);
+    margin-top: 0.5rem;
+  }
+  p { margin: 0.6rem 0 0; }
+  .muted { color: var(--muted); }
+
+  /* Problem list */
+  .pains { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem; margin-top: 1rem; }
+  .pain b { display: block; margin-bottom: 0.2rem; }
+  .pain p { margin: 0; font-size: 0.92rem; color: var(--muted); }
+
+  /* Curriculum pillars */
+  ol.pillars { margin: 1rem 0 0; padding: 0; list-style: none; counter-reset: pillar; display: flex; flex-direction: column; gap: 0.65rem; }
+  ol.pillars li {
+    counter-increment: pillar;
+    display: grid;
+    grid-template-columns: 1.6rem 1fr;
+    gap: 0.75rem;
+    font-size: 0.95rem;
+  }
+  ol.pillars li::before {
+    content: counter(pillar);
+    font-weight: 700;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+    border-top: 2px solid var(--accent);
+    padding-top: 0.15rem;
+  }
+  ol.pillars b { color: var(--ink); }
+  ol.pillars span { color: var(--muted); }
+
+  /* Delivery (how coaching works) */
+  .delivery { margin-top: 1rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem; }
+  .channel { background: var(--tint); padding: 1.1rem 1.2rem; }
+  .channel b { display: block; margin-bottom: 0.3rem; }
+  .channel p { margin: 0; font-size: 0.9rem; color: var(--muted); }
+
+  /* Roadmap */
+  .roadmap { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); margin-top: 1rem; }
+  .phase { background: var(--card); padding: 1rem 1.1rem; }
+  .phase .days { font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
+  .phase b { display: block; margin: 0.15rem 0 0.35rem; font-size: 1rem; }
+  .phase p { margin: 0; font-size: 0.88rem; color: var(--muted); }
+
+  /* Included */
+  ul.included { margin: 1rem 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.93rem; }
+  ul.included li { padding-left: 1.1rem; position: relative; }
+  ul.included li::before { content: "✓"; position: absolute; left: 0; color: var(--accent); font-weight: 700; }
+
+  /* Packages */
+  .note { font-size: 0.78rem; color: var(--muted); font-style: italic; }
+  .packages { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 1rem; margin-top: 1rem; }
+  .pkg { border: 1px solid var(--rule); padding: 1.25rem 1.2rem 1.35rem; display: flex; flex-direction: column; gap: 0.4rem; }
+  .pkg.featured { background: var(--tint); border-color: var(--accent); border-width: 2px; }
+  .pkg .tier { font-size: 0.72rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); font-weight: 700; }
+  .pkg .price { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.01em; }
+  .pkg .per { font-size: 0.8rem; color: var(--muted); }
+  .pkg ul { margin: 0.5rem 0 0; padding-left: 1.1rem; font-size: 0.86rem; color: var(--muted); display: flex; flex-direction: column; gap: 0.3rem; }
+  .terms { margin-top: 1.1rem; font-size: 0.85rem; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 0.8rem; }
+
+  /* Guarantee + CTA */
+  .closing { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1.5rem; align-items: stretch; }
+  .guarantee { border-left: 3px solid var(--accent); padding: 0.2rem 0 0.2rem 1.1rem; font-size: 0.95rem; }
+  .cta { background: #1a3a2a; color: var(--masthead-ink); padding: 1.3rem 1.4rem; }
+  .cta b { display: block; font-size: 1.05rem; margin-bottom: 0.4rem; }
+  .cta p { margin: 0; font-size: 0.88rem; color: #c4d8cb; }
+  @media (max-width: 640px) {
+    .body, .masthead { padding-left: 1.5rem; padding-right: 1.5rem; }
+    .closing { grid-template-columns: 1fr; }
+  }
+
+  /* Print: force light palette, US Letter */
+  @media print {
+    :root, :root[data-theme="dark"] {
+      --ink: #1a3a2a; --accent: #2d6a4f; --paper: #ffffff; --card: #ffffff;
+      --muted: #5c6b61; --rule: #c9d6cc; --tint: #e8f0ea;
+    }
+    body { padding: 0; background: #fff; }
+    .sheet { max-width: none; border: none; box-shadow: none; }
+    .masthead, .cta, .channel { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    section { break-inside: avoid; }
+    @page { size: letter; margin: 0.5in; }
+  }
+</style>
+
+<div class="sheet">
+  <header class="masthead">
+    <div class="brandline">
+      <span class="wordmark">FILO</span>
+      <span class="service">Business Coaching · Landscaping Companies</span>
+    </div>
+    <h1>Build a landscaping business that runs without you.</h1>
+    <p class="dek">One-on-one business coaching for landscaping company owners — delivered over Zoom and email, so you get expert guidance without leaving the field.</p>
+  </header>
+
+  <div class="body">
+    <section>
+      <h2>The problem we solve</h2>
+      <div class="pains">
+        <div class="pain"><b>Slow quotes lose jobs.</b><p>Prospects sign with whoever gets a professional proposal in front of them first. Hand-built quotes take days.</p></div>
+        <div class="pain"><b>Follow-ups slip.</b><p>Leads go cold in the inbox. No system means no second touch — and no second touch means no sale.</p></div>
+        <div class="pain"><b>The owner is the bottleneck.</b><p>Quotes, invoices, scheduling, chasing payments — everything routes through one person's phone.</p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>What we coach you on</h2>
+      <ol class="pillars">
+        <li><div><b>Pricing &amp; quoting.</b> <span>Price for profit, quote fast, and stop competing on being the cheapest bid.</span></div></li>
+        <li><div><b>Sales pipeline &amp; follow-up.</b> <span>A simple system so every lead gets a first touch, a second touch, and a close — automatically.</span></div></li>
+        <li><div><b>Systems &amp; automation.</b> <span>Turn the busywork — intake, reminders, invoicing, review requests — into processes that run themselves.</span></div></li>
+        <li><div><b>Team &amp; delegation.</b> <span>Get work off the owner's plate: hiring, training checklists, and who-does-what clarity.</span></div></li>
+        <li><div><b>Numbers that matter.</b> <span>Leads, close rate, average job value, revenue — reviewed together so you steer with data, not gut feel.</span></div></li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>How coaching works</h2>
+      <p class="muted">All correspondence happens over Zoom and email — no travel, no office visits, no software to learn.</p>
+      <div class="delivery">
+        <div class="channel"><b>Zoom coaching sessions</b><p>Scheduled video calls at a cadence that fits your package. Every session has an agenda, ends with clear action items, and is recorded so you can rewatch anytime.</p></div>
+        <div class="channel"><b>Email between sessions</b><p>Stuck on a quote? Drafting a tough client email? Send it over — you get a considered reply within one business day.</p></div>
+        <div class="channel"><b>Action items, not homework</b><p>After each call you get a short written recap: what we decided, what you're doing next, and what we'll review together.</p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Your first 90 days</h2>
+      <div class="roadmap">
+        <div class="phase"><span class="days">Days 1–14</span><b>Diagnose</b><p>Kickoff Zoom session. We map how work flows through your business today, find the leaks, and set baseline numbers.</p></div>
+        <div class="phase"><span class="days">Days 15–45</span><b>Fix the big leaks</b><p>Sessions focus on the highest-payoff changes first — usually pricing, quoting speed, and follow-up.</p></div>
+        <div class="phase"><span class="days">Days 46–90</span><b>Systemize</b><p>Build the routines and delegation so the improvements stick — and keep sticking after coaching ends.</p></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>What's included</h2>
+      <ul class="included">
+        <li>Regular one-on-one Zoom coaching sessions</li>
+        <li>Email correspondence between sessions</li>
+        <li>Session recordings and written recaps after every call</li>
+        <li>Templates: quotes, follow-up emails, hiring checklists</li>
+        <li>Monthly numbers review (leads, close rate, job value, revenue)</li>
+        <li>A coach who only works with landscaping businesses</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Packages</h2>
+      <p class="note">Suggested pricing — edit before sending.</p>
+      <div class="packages">
+        <div class="pkg">
+          <span class="tier">Email Coaching</span>
+          <span class="price">$495</span>
+          <span class="per">per month</span>
+          <ul>
+            <li>Unlimited email correspondence</li>
+            <li>Reply within one business day</li>
+            <li>Templates library</li>
+            <li>Monthly written review letter</li>
+          </ul>
+        </div>
+        <div class="pkg featured">
+          <span class="tier">Core Coaching</span>
+          <span class="price">$1,250</span>
+          <span class="per">per month</span>
+          <ul>
+            <li>Two Zoom sessions per month</li>
+            <li>Unlimited email between sessions</li>
+            <li>Recordings &amp; written recaps</li>
+            <li>Monthly numbers review</li>
+          </ul>
+        </div>
+        <div class="pkg">
+          <span class="tier">Intensive</span>
+          <span class="price">$2,500</span>
+          <span class="per">per month</span>
+          <ul>
+            <li>Weekly Zoom sessions</li>
+            <li>Priority email — same-day reply</li>
+            <li>Monthly numbers review</li>
+            <li>Quarterly planning session</li>
+          </ul>
+        </div>
+      </div>
+      <p class="terms">Month-to-month. No long-term contract — cancel anytime.</p>
+    </section>
+
+    <section>
+      <div class="closing">
+        <div class="guarantee">
+          <h2>Our guarantee</h2>
+          <p>If you don't see a measurable improvement in your close rate or quote turnaround within 90 days, your next month of coaching is free.</p>
+        </div>
+        <div class="cta">
+          <b>Book a free 30-minute Zoom consultation</b>
+          <p>Esteph Christison<br>esteph@getfilocrm.com<br>getfilocrm.com</p>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
