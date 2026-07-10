@@ -1,0 +1,28 @@
+name = "kgl-jobber-agent-gateway"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+
+# Custom domain — attach in dashboard or uncomment after DNS is ready:
+# routes = [{ pattern = "agent-jobber.kingsgardenlandscaping.com", custom_domain = true }]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kgl-jobber-agent"
+database_id = "REPLACE_AFTER_wrangler_d1_create"
+
+[[kv_namespaces]]
+binding = "CONTROL"
+id = "REPLACE_AFTER_wrangler_kv_namespace_create"
+
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "kgl-jobber-agent-files"
+
+[vars]
+# Non-secret configuration. Secrets are set with `wrangler secret put`:
+#   KGL_AGENT_API_KEY      — ChatGPT -> gateway bearer key
+#   JOBBER_CLIENT_ID       — Jobber OAuth app client id
+#   JOBBER_CLIENT_SECRET   — Jobber OAuth app client secret
+JOBBER_REDIRECT_URI = "https://agent-jobber.kingsgardenlandscaping.com/oauth/callback"
+# Set after first /auth to pin the gateway to the KGL account (shown on /status):
+JOBBER_ACCOUNT_ID = ""
