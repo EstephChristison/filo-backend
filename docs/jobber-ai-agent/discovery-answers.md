@@ -1,9 +1,12 @@
-# KGL Jobber AI Agent — Discovery Questionnaire Answers
+# KGL Jobber AI Agent — Governing Specification
 
-Answer sheet for the 595-question discovery questionnaire. Answers marked
-**(locked)** were set by Esteph in the questionnaire and are treated as fixed
-policy. Everything else is the recommended answer; items marked **[DECIDE]**
-are genuinely Esteph's call and need confirmation before build.
+Status: **Approved.** All 595 answers below — including the seven items
+originally flagged for owner decision — are confirmed as governing policy
+and build requirements for the KGL Jobber AI Agent.
+
+Answers marked **(locked)** were set by Esteph in the original questionnaire.
+The seven items in §31 (formerly marked "[DECIDE]") were confirmed by Esteph
+and are now locked policy as well.
 
 Governing principles used throughout:
 
@@ -23,7 +26,7 @@ Governing principles used throughout:
 5. Yes — enforced in the gateway by account-ID allowlist, not just instructions (see §23).
 6. Yes — single-company build. No multi-tenant abstractions yet.
 7. Yes — every operation logged as "Esteph via AI Agent" plus session ID.
-8. **[DECIDE]** Recommendation: **King's Garden AI Agent** as the formal/audit name (clear and professional in logs and future multi-user use); "KGL Jobber Right Hand" works as the chat nickname.
+8. **King's Garden AI Agent** — confirmed formal/audit name. (locked)
 9. Both — on-demand plus scheduled checks (morning control tower, end-of-day close-the-loop).
 10. Yes — scheduled checks are strictly read-only; they produce proposals, never actions.
 
@@ -136,7 +139,7 @@ Governing principles used throughout:
 108. Yes — check for unrecorded deposits before creating the final invoice.
 109. Yes — residential defaults to due upon receipt.
 110. Yes — terms vary by job type.
-111. **[DECIDE — defaults proposed]** Residential: due upon receipt. Commercial: Net 30. Calloways/Cornelius: Net 30 (match their remittance cycle). T&M: due upon receipt. Progress billing: due upon receipt per milestone.
+111. **Confirmed.** (locked) Residential: due upon receipt. Commercial: Net 30. Calloways/Cornelius: Net 30. T&M: due upon receipt. Progress billing: due upon receipt per milestone.
 112. Yes — sales tax automatic per established rules (8.25%, exemptions per §16).
 113. Yes — refuse invoice creation when taxability is uncertain (fail closed).
 114. Yes — warn on any invoice-total vs quote-total difference.
@@ -277,7 +280,7 @@ Governing principles used throughout:
 241. …overridable only by your explicit approval.
 242. Yes — travel time included between jobs.
 243. Yes — Houston traffic estimates factored in.
-244. **[DECIDE]** Proposed default: **25-mile radius** from base.
+244. **25-mile radius** from the KGL base. (locked)
 245. Yes — warns on jobs outside the radius…
 246. …and schedules them only with your approval.
 247. Informational by default; **blocking** for the conditions in 248.
@@ -345,8 +348,8 @@ Governing principles used throughout:
 312. Correct — internal cost never appears in customer-facing documents (enforced by template, not just instruction).
 313. Yes — internal cost used for margin analysis.
 314. Yes — margin analysis runs automatically before a quote is finalized.
-315. **[DECIDE]** Proposed: warn below **40% gross margin**.
-316. **[DECIDE]** Proposed: hard-refuse below **25%** unless you explicitly override.
+315. Warn below **40% gross margin**. (locked)
+316. Hard-refuse below **25%** unless you explicitly override. (locked)
 317. Yes — searches for close catalog matches when an exact item is missing…
 318. …yes, presents candidates and you choose…
 319. …and never chooses between similar plant varieties on its own.
@@ -439,7 +442,7 @@ Governing principles used throughout:
 398. Yes — drainage work requires elevation and flow verification.
 399. Yes — hardscape requires measurements and final cleanup verification.
 400. Yes — mandatory final walkthrough above a value threshold.
-401. **[DECIDE]** Proposed threshold: **$5,000**.
+401. **$5,000** or more. (locked)
 402. Yes — job completion blocked when required checklist items are missing.
 403. Yes — callback risks create an automatic warning.
 404–405. Yes — recommends a paid maintenance option at closeout, **prepared for you only**; never sent to the customer.
@@ -461,10 +464,10 @@ Governing principles used throughout:
 ## 21. Automations and proactive monitoring
 
 420. Yes — morning control-tower report.
-421. **[DECIDE]** Proposed: **6:30 AM CT** (before crew dispatch).
+421. **6:30 AM CT** (before crew dispatch). (locked)
 422. Yes — all fourteen listed items.
 423. Yes — end-of-day close-the-loop report.
-424. **[DECIDE]** Proposed: **5:30 PM CT**.
+424. **5:30 PM CT**. (locked)
 425–426. Yes — stale requests monitored; stale after **24 hours** without action.
 427–428. Yes — stale quotes monitored; stale after **7 days** awaiting response.
 429. Yes — jobs requiring invoicing monitored.
@@ -642,18 +645,23 @@ Governing principles used throughout:
 592. Yes — fail closed on any uncertainty about permission, identity, payment status, or tax status.
 593. Yes — live Jobber data always beats remembered context.
 594. Yes — stored master-context rules are policy; live client/job status is always verified.
-595. **[DECIDE — for Esteph.]** Suggested framing to react to: *"I open the morning control tower, approve a short queue, and nothing slips: every consultation has a quote within 24 hours, every completed job is invoiced the same day, every payment is recorded, zero unauthorized customer contact, zero duplicates — and I no longer keep the pipeline in my head."*
+595. **Confirmed.** (locked) *"I open the morning control tower, approve a short queue, and nothing slips: every consultation has a quote within 24 hours, every completed job is invoiced the same day, every payment is recorded, zero unauthorized customer contact, zero duplicates, and I no longer keep the pipeline in my head."*
 
 ---
 
-## Open items requiring Esteph's confirmation
+## 31. Final confirmations (formerly open decisions)
 
-| # | Item | Proposed default |
+All seven items below were confirmed by Esteph and are now locked policy, identical in substance to the proposed defaults:
+
+| # | Item | Confirmed value |
 |---|------|------------------|
-| 8 | Agent name | King's Garden AI Agent |
-| 111 | Payment terms by job type | Residential DUE / Commercial N30 / Calloways N30 / T&M DUE / Progress DUE per milestone |
-| 244 | Service radius | 25 miles |
-| 315/316 | Margin warn / hard floor | 40% / 25% |
-| 401 | Final-walkthrough threshold | $5,000 |
-| 421/424 | Report times | 6:30 AM / 5:30 PM CT |
-| 595 | 30-day definition of "perfect" | Draft provided above |
+| 8 | Formal agent name | King's Garden AI Agent |
+| 111 | Payment terms by job type | Residential: due upon receipt · Commercial: Net 30 · Calloways/Cornelius: Net 30 · T&M: due upon receipt · Progress billing: due upon receipt per milestone |
+| 244 | Service radius | 25 miles from the KGL base |
+| 315/316 | Margin warn / hard stop | Warn below 40% gross margin · Hard stop below 25% unless explicitly overridden |
+| 401 | Mandatory final-walkthrough threshold | Jobs of $5,000 or more |
+| 421/424 | Scheduled report times | Morning control tower: 6:30 AM CT · End-of-day close-the-loop: 5:30 PM CT |
+| 595 | 30-day definition of "perfect" | See confirmed statement at Q595 above |
+
+This document is now the complete, approved governing specification for the
+KGL Jobber AI Agent. All 595 answers are policy and build requirements.
