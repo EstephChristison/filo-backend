@@ -8,11 +8,11 @@ compatibility_date = "2026-06-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "kgl-jobber-agent"
-database_id = "REPLACE_AFTER_wrangler_d1_create"
+database_id = "40b16d46-cfe6-4fa4-87ef-c5ee8bffebf3"
 
 [[kv_namespaces]]
 binding = "CONTROL"
-id = "REPLACE_AFTER_wrangler_kv_namespace_create"
+id = "a7015e2fdc974e9fa427e9bf157a3e16"
 
 [[r2_buckets]]
 binding = "FILES"

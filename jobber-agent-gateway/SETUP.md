@@ -21,21 +21,17 @@ A secret value was pasted into an AI chat earlier. In the **Jobber
 Developer Center**, rotate the client secret of your OAuth app. Keep the
 new value in a password manager only.
 
-## 2. Create the Cloudflare resources
+## 2. Create the Cloudflare resources — ✅ ALREADY DONE (2026-07-10)
 
-```bash
-cd jobber-agent-gateway
+Provisioned directly in your Cloudflare account via this session's
+Cloudflare connector; `wrangler.toml` already contains the real IDs:
 
-wrangler d1 create kgl-jobber-agent
-# → copy the database_id it prints into wrangler.toml
+- D1 database `kgl-jobber-agent` — `40b16d46-cfe6-4fa4-87ef-c5ee8bffebf3`,
+  schema applied (proposals, audit_log, design manifests/revisions)
+- KV namespace `kgl-jobber-agent-control` — `a7015e2fdc974e9fa427e9bf157a3e16`
+- R2 bucket `kgl-jobber-agent-files`
 
-wrangler kv namespace create CONTROL
-# → copy the id it prints into wrangler.toml
-
-wrangler r2 bucket create kgl-jobber-agent-files
-
-wrangler d1 execute kgl-jobber-agent --remote --file=schema.sql
-```
+Nothing to run in this step. Skip to step 3.
 
 ## 3. Set the secrets (typed into hidden prompts — never into chat)
 
