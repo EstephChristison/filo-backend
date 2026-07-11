@@ -348,6 +348,14 @@ function firstId(data, mutation, node) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+async function body(request) {
+  try {
+    return await request.json();
+  } catch {
+    throw httpError(422, 'request body must be valid JSON');
+  }
+}
+
 function allowedRequired(type) {
   return { request: ['client_id', 'title'], quote: ['client_id', 'title', 'line_items'], note: ['client_id', 'body'] }[type];
 }
