@@ -1,0 +1,189 @@
+openapi: 3.1.0
+info:
+  title: KGL Jobber Agent Gateway
+  description: >
+    Narrow, authenticated gateway for the King's Garden AI Agent.
+    Reads live Jobber data and performs prepared, approval-bound internal
+    writes. There are no endpoints for deletion, quote sending, payment
+    initiation, or any customer communication.
+  version: 1.0.0
+servers:
+  - url: https://agent-jobber.kingsgardenlandscaping.com
+paths:
+  /v1/health:
+    get:
+      operationId: getHealth
+      summary: Gateway and Jobber connection status
+      responses:
+        "200":
+          description: Status
+  /v1/clients/search:
+    post:
+      operationId: searchClients
+      summary: Search Jobber clients by name, phone, email, or address
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [query]
+              properties:
+                query: { type: string, description: Search term }
+                limit: { type: integer, maximum: 25, default: 10 }
+      responses:
+        "200": { description: Matching clients }
+  /v1/clients/{client_id}/brief:
+    get:
+      operationId: getClientBrief
+      summary: Full live brief for one client — contacts, properties, quotes, jobs, invoices, recent notes
+      parameters:
+        - name: client_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Client brief with live Jobber data }
+  /v1/catalog/search:
+    post:
+      operationId: searchCatalog
+      summary: Search the Jobber product/service catalog (the exclusive pricing source; $0 and description-less items are excluded)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [query]
+              properties:
+                query: { type: string }
+                limit: { type: integer, maximum: 50, default: 15 }
+      responses:
+        "200": { description: Eligible catalog items }
+  /v1/requests/prepare:
+    post:
+      operationId: prepareRequest
+      summary: Prepare (not create) a new Jobber Request. Returns a preview and proposal_id for Esteph's approval.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [client_id, title]
+              properties:
+                client_id: { type: string }
+                title: { type: string }
+                description: { type: string }
+                source: { type: string, description: Lead source (mandatory per KGL policy before commit) }
+      responses:
+        "200": { description: proposal_id, preview, and expiry }
+  /v1/requests/commit:
+    post:
+      operationId: commitRequest
+      x-openai-isConsequential: true
+      summary: Commit a previously prepared Request after Esteph approved the exact preview. Accepts proposal_id only — no payload changes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [proposal_id, approval_text]
+              properties:
+                proposal_id: { type: string }
+                approval_text: { type: string, description: Esteph's verbatim approval message }
+                idempotency_key: { type: string }
+      responses:
+        "200": { description: Committed — returns the Jobber record id }
+  /v1/quotes/prepare:
+    post:
+      operationId: prepareQuote
+      summary: Prepare (not create) a draft quote from catalog line items. Returns preview + proposal_id. 10-minute approval window.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [client_id, title, line_items]
+              properties:
+                client_id: { type: string }
+                property_id: { type: string }
+                title: { type: string }
+                line_items:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [name, quantity, unit_price]
+                    properties:
+                      name: { type: string, description: Must exactly match a Jobber catalog item name }
+                      description: { type: string }
+                      quantity: { type: number }
+                      unit_price: { type: number, description: Catalog price. $0 items are rejected. }
+                      taxable: { type: boolean, default: true }
+                message_internal: { type: string }
+      responses:
+        "200": { description: proposal_id, preview, and expiry }
+  /v1/quotes/commit:
+    post:
+      operationId: commitQuote
+      x-openai-isConsequential: true
+      summary: Commit a previously prepared draft quote after Esteph approved the exact preview. Draft only — quote sending does not exist in this API.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [proposal_id, approval_text]
+              properties:
+                proposal_id: { type: string }
+                approval_text: { type: string }
+                idempotency_key: { type: string }
+      responses:
+        "200": { description: Committed — returns the Jobber quote id }
+  /v1/notes/prepare:
+    post:
+      operationId: prepareNote
+      summary: Prepare an internal client note (append-only; AI summaries must be tagged "[AI summary]").
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [client_id, body]
+              properties:
+                client_id: { type: string }
+                body: { type: string }
+                pinned: { type: boolean, default: false }
+      responses:
+        "200": { description: proposal_id, preview, and expiry }
+  /v1/notes/commit:
+    post:
+      operationId: commitNote
+      x-openai-isConsequential: true
+      summary: Commit a previously prepared internal note.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [proposal_id, approval_text]
+              properties:
+                proposal_id: { type: string }
+                approval_text: { type: string }
+                idempotency_key: { type: string }
+      responses:
+        "200": { description: Committed — returns the Jobber note id }

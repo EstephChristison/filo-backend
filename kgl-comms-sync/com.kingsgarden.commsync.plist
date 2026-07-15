@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kingsgarden.commsync</string>
+
+    <!-- Runs daily at 3:07 AM. If the Mac is asleep at 3:07, launchd
+         fires the job on wake. If the Mac was powered OFF, RunAtLoad
+         fires it at login/boot — the script itself checks whether the
+         day's run already happened and exits quietly if so. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>__HOME__/.kgl-sync/kgl_sync.py</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>3</integer>
+        <key>Minute</key><integer>7</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.kgl-sync/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.kgl-sync/launchd.log</string>
+</dict>
+</plist>
